@@ -13,7 +13,76 @@ diff --git a/CMakeLists.txt b/CMakeLists.txt
 diff --git a/src/sfloader/fluid_defsfont.c b/src/sfloader/fluid_defsfont.c
 --- a/src/sfloader/fluid_defsfont.c
 +++ b/src/sfloader/fluid_defsfont.c
-@@ -2237,8 +2237,9 @@
+@@ -43,6 +43,9 @@
+ static int fluid_preset_zone_create_voice_zones(fluid_preset_zone_t *preset_zone);
+ static fluid_inst_t *find_inst_by_idx(fluid_defsfont_t *defsfont, int idx);
+ 
++/* mt32-pi: called with the number of bytes of sample data that are about to be loaded, for a progress display */
++void (*fluid_defsfont_preset_load_hook)(fluid_long_long_t bytes) = NULL;
++
+ 
+ /***************************************************************
+  *
+@@ -366,6 +369,11 @@
+         int read_samples;
+         int num_samples = sfdata->samplesize / sizeof(short);
+ 
++        if(fluid_defsfont_preset_load_hook != NULL)
++        {
++            fluid_defsfont_preset_load_hook(sfdata->samplesize);
++        }
++
+         read_samples = fluid_samplecache_load(sfdata, 0, num_samples - 1, 0, defsfont->mlock,
+                                               &defsfont->sampledata, &defsfont->sample24data);
+ 
+@@ -2221,6 +2229,46 @@
+     SFData *sffile = NULL;
+ 
+     defpreset = fluid_preset_get_data(preset);
++
++    if(fluid_defsfont_preset_load_hook != NULL)
++    {
++        fluid_long_long_t bytes = 0;
++
++        /* Add up the samples that will be loaded; samples that several zones use are marked with a
++         * preset_count of -1 so that they are only counted once, and unmarked afterwards */
++        for(preset_zone = fluid_defpreset_get_zone(defpreset); preset_zone != NULL; preset_zone = fluid_preset_zone_next(preset_zone))
++        {
++            for(inst_zone = fluid_inst_get_zone(fluid_preset_zone_get_inst(preset_zone)); inst_zone != NULL; inst_zone = fluid_inst_zone_next(inst_zone))
++            {
++                sample = fluid_inst_zone_get_sample(inst_zone);
++
++                if((sample != NULL) && (sample->start != sample->end) && sample->preset_count == 0 && sample->data == NULL)
++                {
++                    bytes += (fluid_long_long_t)(sample->source_end - sample->source_start + 1) * sizeof(short);
++                    sample->preset_count = -1;
++                }
++            }
++        }
++
++        for(preset_zone = fluid_defpreset_get_zone(defpreset); preset_zone != NULL; preset_zone = fluid_preset_zone_next(preset_zone))
++        {
++            for(inst_zone = fluid_inst_get_zone(fluid_preset_zone_get_inst(preset_zone)); inst_zone != NULL; inst_zone = fluid_inst_zone_next(inst_zone))
++            {
++                sample = fluid_inst_zone_get_sample(inst_zone);
++
++                if((sample != NULL) && sample->preset_count == -1)
++                {
++                    sample->preset_count = 0;
++                }
++            }
++        }
++
++        if(bytes > 0)
++        {
++            fluid_defsfont_preset_load_hook(bytes);
++        }
++    }
++
+     preset_zone = fluid_defpreset_get_zone(defpreset);
+ 
+     while(preset_zone != NULL)
+@@ -2237,8 +2285,9 @@
                  sample->preset_count++;
  
                  /* If this is the first time this sample has been selected,
@@ -25,6 +94,17 @@ diff --git a/src/sfloader/fluid_defsfont.c b/src/sfloader/fluid_defsfont.c
                  {
                      /* Make sure we have an open Soundfont file. Do this here
                       * to avoid having to open the file if no loading is necessary
+diff --git a/src/sfloader/fluid_defsfont.h b/src/sfloader/fluid_defsfont.h
+--- a/src/sfloader/fluid_defsfont.h
++++ b/src/sfloader/fluid_defsfont.h
+@@ -136,6 +136,7 @@
+ fluid_preset_t *fluid_defsfont_iteration_next(fluid_defsfont_t *defsfont);
+ int fluid_defsfont_load_sampledata(fluid_defsfont_t *defsfont, SFData *sfdata, fluid_sample_t *sample);
+ int fluid_defsfont_load_all_sampledata(fluid_defsfont_t *defsfont, SFData *sfdata);
++extern void (*fluid_defsfont_preset_load_hook)(fluid_long_long_t bytes);
+ 
+ int fluid_defsfont_add_sample(fluid_defsfont_t *defsfont, fluid_sample_t *sample);
+ int fluid_defsfont_add_preset(fluid_defsfont_t *defsfont, fluid_defpreset_t *defpreset);
 diff --git a/src/utils/fluid_sys.c b/src/utils/fluid_sys.c
 --- a/src/utils/fluid_sys.c
 +++ b/src/utils/fluid_sys.c

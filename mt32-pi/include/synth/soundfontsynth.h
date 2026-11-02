@@ -59,9 +59,9 @@ public:
 		u8 nDecimals;
 	};
 
-	// Called with the number of megabytes read so far while a SoundFont or instrument takes long to load,
-	// from the task that is loading it
-	using TLoadProgressHandler = void (*)(unsigned nMegabytes, void* pContext);
+	// Called with the number of bytes read so far while a SoundFont or instrument takes long to load, from the
+	// task that is loading it; the total is the amount of sample data being loaded, or 0 if unknown
+	using TLoadProgressHandler = void (*)(u64 nLoadedBytes, u64 nTotalBytes, void* pContext);
 
 	CSoundFontSynth(unsigned nSampleRate);
 	virtual ~CSoundFontSynth() override;

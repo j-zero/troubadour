@@ -86,7 +86,17 @@ constexpr u64 BytesPerMegabyte = 1024 * 1024;
 static CSoundFontSynth::TLoadProgressHandler s_pLoadProgressHandler = nullptr;
 static void* s_pLoadProgressContext = nullptr;
 static u64 s_nLoadedBytes = 0;
+static u64 s_nTotalBytes = 0;
 static unsigned s_nLoadProgressTime = 0;
+
+// Our addition to FluidSynth: called with the amount of sample data that is about to be loaded
+extern "C" void (*fluid_defsfont_preset_load_hook)(fluid_long_long_t nBytes);
+
+static void PresetLoadHook(fluid_long_long_t nBytes)
+{
+	s_nTotalBytes  = nBytes;
+	s_nLoadedBytes = 0;
+}
 
 // With dynamic sample loading, FluidSynth reads from the SD card from within calls that are made with the
 // synth lock held. The lock must be dropped for the duration of any file access; the audio task would stall
@@ -138,6 +148,9 @@ static int SoundFontClose(void* pHandle)
 	const FRESULT Result = f_close(&pFile->File);
 	delete pFile;
 
+	// Loading is complete
+	s_nTotalBytes = 0;
+
 	return Result == FR_OK ? FLUID_OK : FLUID_FAILED;
 }
 
@@ -159,7 +172,7 @@ static int SoundFontRead(void* pBuffer, fluid_long_long_t nCount, void* pHandle)
 	if (s_pLoadProgressHandler && s_nLoadedBytes >= BytesPerMegabyte && nTicks - s_nLoadProgressTime >= LoadProgressPeriodMicros)
 	{
 		s_nLoadProgressTime = nTicks;
-		s_pLoadProgressHandler(s_nLoadedBytes / BytesPerMegabyte, s_pLoadProgressContext);
+		s_pLoadProgressHandler(s_nLoadedBytes, s_nTotalBytes, s_pLoadProgressContext);
 	}
 
 	return Result == FR_OK && nRead == nCount ? FLUID_OK : FLUID_FAILED;
@@ -220,6 +233,12 @@ public:
 	bool SamplesLoaded() const { return s_bSamplesLoaded; }
 };
 
+// Order of the instrument list: by bank, then program
+static bool IsPresetBefore(int nBank, int nProgram, int nOtherBank, int nOtherProgram)
+{
+	return nBank < nOtherBank || (nBank == nOtherBank && nProgram < nOtherProgram);
+}
+
 static void FormatProgramName(char* pBuffer, size_t nSize, int nBank, int nProgram, const char* pName)
 {
 	if (nBank)
@@ -271,6 +290,7 @@ void CSoundFontSynth::SetLoadProgressHandler(TLoadProgressHandler pHandler, void
 {
 	s_pLoadProgressHandler = pHandler;
 	s_pLoadProgressContext = pContext;
+	fluid_defsfont_preset_load_hook = pHandler ? PresetLoadHook : nullptr;
 }
 
 void CSoundFontSynth::FluidSynthLogCallback(int nLevel, const char* pMessage, void* pUser)
@@ -516,7 +536,7 @@ size_t CSoundFontSynth::GetChannelPresetIndex(u8 nChannel)
 	// First preset at or after the current one
 	for (size_t i = 0; i < m_nPresets; ++i)
 	{
-		if (m_pPresets[i].nProgram > nProgram || (m_pPresets[i].nProgram == nProgram && m_pPresets[i].nBank >= nBank))
+		if (!IsPresetBefore(m_pPresets[i].nBank, m_pPresets[i].nProgram, nBank, nProgram))
 			return i;
 	}
 
@@ -915,7 +935,7 @@ void CSoundFontSynth::BuildPresetList()
 
 	m_pPresets = new TPreset[nCount];
 
-	// Sorted by program, then bank, so that variations follow their GM instrument
+	// Sorted by bank, then program, so that each bank is listed as a whole
 	fluid_sfont_iteration_start(pSoundFont);
 	while (fluid_preset_t* pPreset = fluid_sfont_iteration_next(pSoundFont))
 	{
@@ -926,7 +946,7 @@ void CSoundFontSynth::BuildPresetList()
 		const TPreset Preset = { static_cast<u16>(nBank), static_cast<u8>(fluid_preset_get_num(pPreset)) };
 
 		size_t i = m_nPresets++;
-		while (i > 0 && (m_pPresets[i - 1].nProgram > Preset.nProgram || (m_pPresets[i - 1].nProgram == Preset.nProgram && m_pPresets[i - 1].nBank > Preset.nBank)))
+		while (i > 0 && IsPresetBefore(Preset.nBank, Preset.nProgram, m_pPresets[i - 1].nBank, m_pPresets[i - 1].nProgram))
 		{
 			m_pPresets[i] = m_pPresets[i - 1];
 			--i;

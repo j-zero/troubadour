@@ -1051,7 +1051,7 @@ void CMT32Pi::ProcessFootswitchEvent(const TButtonEvent& Event)
 {
 	// Footswitches act when released, so that pressing both doesn't also move the selection
 	const u8 nMask = Event.Button == TButton::Button1 ? 0b01 : 0b10;
-	const int nDelta = Event.Button == TButton::Button1 ? -1 : 1;
+	const int nDelta = Event.Button == TButton::Button1 ? 1 : -1;
 
 	if (Event.bRepeat)
 	{
@@ -1415,14 +1415,17 @@ void CMT32Pi::IRQMIDIReceiveHandler(const u8* pData, size_t nSize)
 	}
 }
 
-void CMT32Pi::LoadProgressHandler(unsigned nMegabytes, void* pContext)
+void CMT32Pi::LoadProgressHandler(u64 nLoadedBytes, u64 nTotalBytes, void* pContext)
 {
 	CMT32Pi* const pThis = static_cast<CMT32Pi*>(pContext);
+	if (!pThis->m_pDisplay)
+		return;
 
+	// The UI task hasn't started yet during startup; draw directly
 	if (pThis->m_bStartupDone)
-		pThis->LCDLog(TLCDLogType::Spinner, "Loading %u MB", nMegabytes);
+		pThis->m_UserInterface.ShowLoadProgress(nLoadedBytes, nTotalBytes);
 	else
-		pThis->LCDLog(TLCDLogType::Startup, "Loading %u MB", nMegabytes);
+		pThis->m_UserInterface.ShowStartupProgress(*pThis->m_pDisplay, MT32PiFullName, nLoadedBytes, nTotalBytes);
 }
 
 void CMT32Pi::PanicHandler()

@@ -43,6 +43,9 @@ static int dynamic_samples_sample_notify(fluid_sample_t *sample, int reason);
 static int fluid_preset_zone_create_voice_zones(fluid_preset_zone_t *preset_zone);
 static fluid_inst_t *find_inst_by_idx(fluid_defsfont_t *defsfont, int idx);
 
+/* mt32-pi: called with the number of bytes of sample data that are about to be loaded, for a progress display */
+void (*fluid_defsfont_preset_load_hook)(fluid_long_long_t bytes) = NULL;
+
 
 /***************************************************************
  *
@@ -365,6 +368,11 @@ int fluid_defsfont_load_all_sampledata(fluid_defsfont_t *defsfont, SFData *sfdat
     {
         int read_samples;
         int num_samples = sfdata->samplesize / sizeof(short);
+
+        if(fluid_defsfont_preset_load_hook != NULL)
+        {
+            fluid_defsfont_preset_load_hook(sfdata->samplesize);
+        }
 
         read_samples = fluid_samplecache_load(sfdata, 0, num_samples - 1, 0, defsfont->mlock,
                                               &defsfont->sampledata, &defsfont->sample24data);
@@ -2221,6 +2229,46 @@ static int load_preset_samples(fluid_defsfont_t *defsfont, fluid_preset_t *prese
     SFData *sffile = NULL;
 
     defpreset = fluid_preset_get_data(preset);
+
+    if(fluid_defsfont_preset_load_hook != NULL)
+    {
+        fluid_long_long_t bytes = 0;
+
+        /* Add up the samples that will be loaded; samples that several zones use are marked with a
+         * preset_count of -1 so that they are only counted once, and unmarked afterwards */
+        for(preset_zone = fluid_defpreset_get_zone(defpreset); preset_zone != NULL; preset_zone = fluid_preset_zone_next(preset_zone))
+        {
+            for(inst_zone = fluid_inst_get_zone(fluid_preset_zone_get_inst(preset_zone)); inst_zone != NULL; inst_zone = fluid_inst_zone_next(inst_zone))
+            {
+                sample = fluid_inst_zone_get_sample(inst_zone);
+
+                if((sample != NULL) && (sample->start != sample->end) && sample->preset_count == 0 && sample->data == NULL)
+                {
+                    bytes += (fluid_long_long_t)(sample->source_end - sample->source_start + 1) * sizeof(short);
+                    sample->preset_count = -1;
+                }
+            }
+        }
+
+        for(preset_zone = fluid_defpreset_get_zone(defpreset); preset_zone != NULL; preset_zone = fluid_preset_zone_next(preset_zone))
+        {
+            for(inst_zone = fluid_inst_get_zone(fluid_preset_zone_get_inst(preset_zone)); inst_zone != NULL; inst_zone = fluid_inst_zone_next(inst_zone))
+            {
+                sample = fluid_inst_zone_get_sample(inst_zone);
+
+                if((sample != NULL) && sample->preset_count == -1)
+                {
+                    sample->preset_count = 0;
+                }
+            }
+        }
+
+        if(bytes > 0)
+        {
+            fluid_defsfont_preset_load_hook(bytes);
+        }
+    }
+
     preset_zone = fluid_defpreset_get_zone(defpreset);
 
     while(preset_zone != NULL)

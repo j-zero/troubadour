@@ -88,9 +88,11 @@ public:
 
 	// Drawn immediately; only before the UI task has started, or after it has stopped
 	void ShowStartup(CGC9A01& Display, const char* pVersion, const char* pStatus);
+	void ShowStartupProgress(CGC9A01& Display, const char* pVersion, u64 nLoadedBytes, u64 nTotalBytes);
 	void ShowPanic(CGC9A01& Display, const char* pMessage);
 
 	void ShowSystemMessage(const char* pMessage, bool bSpinner = false, TMessageType Type = TMessageType::Notice);
+	void ShowLoadProgress(u64 nLoadedBytes, u64 nTotalBytes);
 	void ClearSpinnerMessage();
 	void DisplayImage(TImage Image);
 	void ShowSysExText(TSysExDisplayMessage Type, const u8* pMessage, size_t nSize, u8 nOffset);
@@ -110,6 +112,7 @@ private:
 		None,
 		DisplayingMessage,
 		DisplayingSpinnerMessage,
+		DisplayingLoadProgress,
 		DisplayingImage,
 		DisplayingSysExText,
 		DisplayingSysExBitmap,
@@ -122,6 +125,7 @@ private:
 	void DrawChannelLevels(const float* pLevels, const float* pPeaks, int nY1, int nY2);
 	void DrawGauge(int nInnerRadius, int nOuterRadius, float nFraction, CCanvas::TColor Color);
 	void DrawMessage(const char* pMessage, CCanvas::TColor Color, bool bSpinner, unsigned int nTicks);
+	void DrawLoadProgress(u64 nLoadedBytes, u64 nTotalBytes, int nInnerRadius, int nOuterRadius, int nPercentY);
 	void DrawWrappedText(const TUIFont& Font, const char* pText, int nCenterY, CCanvas::TColor Color, size_t nMaxLines, int nRadius = CCanvas::TextRadius);
 	void DrawMenu(const TMenu& Menu, unsigned int nTicks);
 	void DrawScrollingText(const TUIFont& Font, const char* pText, int nY, CCanvas::TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth = -1);
@@ -146,6 +150,8 @@ private:
 	CSpinLock m_Lock;
 	char m_SystemMessageTextBuffer[SystemMessageTextBufferSize];
 	TMessageType m_SystemMessageType;
+	u64 m_nLoadedBytes;
+	u64 m_nTotalBytes;
 	TSysExDisplayMessage m_SysExDisplayMessageType;
 	char m_SysExTextBuffer[SyxExTextBufferSize];
 	u8 m_SysExPixelBuffer[SysExPixelBufferSize];

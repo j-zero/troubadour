@@ -278,7 +278,7 @@ private:
 	static void IRQMIDIReceiveHandler(const u8* pData, size_t nSize);
 
 	static void PanicHandler();
-	static void LoadProgressHandler(unsigned nMegabytes, void* pContext);
+	static void LoadProgressHandler(u64 nLoadedBytes, u64 nTotalBytes, void* pContext);
 
 	// Set once the UI task owns the LCD; startup messages are printed directly before
 	volatile bool m_bStartupDone;

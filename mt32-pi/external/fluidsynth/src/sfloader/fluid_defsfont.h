@@ -136,6 +136,7 @@ void fluid_defsfont_iteration_start(fluid_defsfont_t *defsfont);
 fluid_preset_t *fluid_defsfont_iteration_next(fluid_defsfont_t *defsfont);
 int fluid_defsfont_load_sampledata(fluid_defsfont_t *defsfont, SFData *sfdata, fluid_sample_t *sample);
 int fluid_defsfont_load_all_sampledata(fluid_defsfont_t *defsfont, SFData *sfdata);
+extern void (*fluid_defsfont_preset_load_hook)(fluid_long_long_t bytes);
 
 int fluid_defsfont_add_sample(fluid_defsfont_t *defsfont, fluid_sample_t *sample);
 int fluid_defsfont_add_preset(fluid_defsfont_t *defsfont, fluid_defpreset_t *defpreset);

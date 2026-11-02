@@ -75,6 +75,8 @@ CUserInterface::CUserInterface()
 	  m_Lock(TASK_LEVEL),
 	  m_SystemMessageTextBuffer{'\0'},
 	  m_SystemMessageType(TMessageType::Notice),
+	  m_nLoadedBytes(0),
+	  m_nTotalBytes(0),
 	  m_SysExDisplayMessageType(TSysExDisplayMessage::Roland),
 	  m_SysExTextBuffer{'\0'},
 	  m_SysExPixelBuffer{0},
@@ -130,6 +132,18 @@ void CUserInterface::Update(CGC9A01& Display, CSoundFontSynth& Synth, unsigned i
 			break;
 		}
 
+		case TState::DisplayingLoadProgress:
+		{
+			m_Lock.Acquire();
+			const u64 nLoadedBytes = m_nLoadedBytes;
+			const u64 nTotalBytes = m_nTotalBytes;
+			m_Lock.Release();
+
+			m_pCanvas->DrawCenteredText(FontSmall, "Loading samples", 76, ColorTextDim, 100);
+			DrawLoadProgress(nLoadedBytes, nTotalBytes, 108, 118, 102);
+			break;
+		}
+
 		case TState::DisplayingImage:
 		{
 			const u8* pImage = m_CurrentImage == TImage::MisterLogo ? MisterLogo128x32 : MT32PiLogo128x32;
@@ -178,6 +192,16 @@ void CUserInterface::ShowStartup(CGC9A01& Display, const char* pVersion, const c
 	Display.Update(*m_pCanvas);
 }
 
+void CUserInterface::ShowStartupProgress(CGC9A01& Display, const char* pVersion, u64 nLoadedBytes, u64 nTotalBytes)
+{
+	m_pCanvas->Clear(ColorBackground);
+	m_pCanvas->DrawBitmap(MT32PiLogo128x32, 128, 32, CCanvas::Center - 96, 64, 3, 2, ColorText);
+	m_pCanvas->DrawCenteredText(FontSmall, pVersion, 118, ColorTextDim, 116);
+	DrawLoadProgress(nLoadedBytes, nTotalBytes, 112, 118, 144);
+
+	Display.Update(*m_pCanvas);
+}
+
 void CUserInterface::ShowPanic(CGC9A01& Display, const char* pMessage)
 {
 	m_pCanvas->Clear(ColorPanic);
@@ -199,6 +223,17 @@ void CUserInterface::ShowSystemMessage(const char* pMessage, bool bSpinner, TMes
 
 	m_nStateTime = CTimer::GetClockTicks();
 	m_State = bSpinner ? TState::DisplayingSpinnerMessage : TState::DisplayingMessage;
+}
+
+void CUserInterface::ShowLoadProgress(u64 nLoadedBytes, u64 nTotalBytes)
+{
+	m_Lock.Acquire();
+	m_nLoadedBytes = nLoadedBytes;
+	m_nTotalBytes = nTotalBytes;
+	m_Lock.Release();
+
+	m_nStateTime = CTimer::GetClockTicks();
+	m_State = TState::DisplayingLoadProgress;
 }
 
 void CUserInterface::ClearSpinnerMessage()
@@ -376,6 +411,37 @@ void CUserInterface::DrawMessage(const char* pMessage, TColor Color, bool bSpinn
 
 	// Inside the spinner's ring
 	DrawWrappedText(FontMedium, pMessage, CCanvas::Center, Color, 3, 100);
+}
+
+void CUserInterface::DrawLoadProgress(u64 nLoadedBytes, u64 nTotalBytes, int nInnerRadius, int nOuterRadius, int nPercentY)
+{
+	constexpr u64 BytesPerMegabyte = 1024 * 1024;
+	char Text[32];
+
+	// Without a known total, only the amount loaded so far can be shown
+	if (!nTotalBytes)
+	{
+		m_pCanvas->FillArc(nInnerRadius, nOuterRadius, 0.0f, 360.0f, ColorTrack);
+		snprintf(Text, sizeof(Text), "%u MB", static_cast<unsigned>(nLoadedBytes / BytesPerMegabyte));
+		m_pCanvas->DrawCenteredText(FontLarge, Text, nPercentY, ColorText);
+		return;
+	}
+
+	nLoadedBytes = Utility::Min(nLoadedBytes, nTotalBytes);
+	const unsigned nPercent = static_cast<unsigned>(nLoadedBytes * 100 / nTotalBytes);
+
+	// Ring filling up clockwise from the top
+	m_pCanvas->FillArc(nInnerRadius, nOuterRadius, 0.0f, 360.0f, ColorTrack);
+	if (nLoadedBytes)
+		m_pCanvas->FillArc(nInnerRadius, nOuterRadius, 0.0f, 360.0f * nLoadedBytes / nTotalBytes, ColorAccent);
+
+	snprintf(Text, sizeof(Text), "%u%%", nPercent);
+	m_pCanvas->DrawCenteredText(FontLarge, Text, nPercentY, ColorText);
+
+	// Rounded up, so that a small total doesn't show as 0 MB
+	snprintf(Text, sizeof(Text), "%u / %u MB", static_cast<unsigned>(nLoadedBytes / BytesPerMegabyte),
+		 static_cast<unsigned>((nTotalBytes + BytesPerMegabyte - 1) / BytesPerMegabyte));
+	m_pCanvas->DrawCenteredText(FontSmall, Text, nPercentY + FontLarge.nHeight + 6, ColorTextFaint);
 }
 
 void CUserInterface::DrawWrappedText(const TUIFont& Font, const char* pText, int nCenterY, TColor Color, size_t nMaxLines, int nRadius)

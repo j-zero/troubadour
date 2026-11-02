@@ -97,13 +97,16 @@ private:
 	// Settings are saved once they haven't changed for this long, so that turning the encoder doesn't write each step
 	static constexpr unsigned LastStateSaveDelayMillis = 2000;
 
-	// Menus of the simple_encoder scheme: the first encoder selects the instrument from a list, the second one
-	// changes the volume and the effects (pressing it selects the next parameter) and selects the SoundFont
+	// Menus of the simple_encoder scheme: the first encoder selects the instrument from a list. Pressing the second
+	// one opens the settings list, where the first encoder selects a setting and opens it; the second encoder then
+	// changes its value (or selects the drum kit/SoundFont from a list), and pressing it returns to the settings list.
 	enum class TMenu
 	{
 		None,
 		Instruments,
+		Settings,
 		Parameter,
+		DrumKits,
 		SoundFonts,
 	};
 
@@ -112,8 +115,15 @@ private:
 	// Detents of the second encoder that follow each other this quickly change values in bigger steps
 	static constexpr unsigned ParameterFastTurnMicros = 25000;
 	static constexpr unsigned ParameterMediumTurnMicros = 60000;
-	static constexpr u8 ParameterPageVolume = 0;
-	static constexpr u8 ParameterPageCount  = 1 + static_cast<u8>(CSoundFontSynth::TEffect::Count);
+
+	// Items of the settings list
+	static constexpr u8 SettingVolume    = 0;
+	static constexpr u8 SettingEffects   = 1;
+	static constexpr u8 SettingChannels  = SettingEffects + static_cast<u8>(CSoundFontSynth::TEffect::Count);
+	static constexpr u8 SettingDrumKit   = SettingChannels + 1;
+	static constexpr u8 SettingSoundFont = SettingDrumKit + 1;
+	static constexpr u8 SettingCount     = SettingSoundFont + 1;
+	static constexpr u8 MaxDisplayChannels = 16;
 
 	// CPower
 	virtual void OnEnterPowerSavingMode() override;
@@ -161,6 +171,11 @@ private:
 	void OpenMenu(TMenu Menu);
 	void CloseMenu();
 	void UpdateMenu();
+	void OpenSetting(u8 nSetting);
+	const char* GetSettingName(u8 nSetting) const;
+	void FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction = nullptr);
+	size_t GetMenuListCount() const;
+	void MoveListSelection(int nDelta);
 	void MoveInstrumentSelection(int nDelta);
 	void SelectMenuInstrument();
 	void ChangeParameter(int nDelta);
@@ -168,7 +183,8 @@ private:
 	void SwitchSoundFont(size_t nIndex);
 	void DeferSwitchSoundFont(size_t nIndex);
 	void ApplyProgramChange(size_t nIndex);
-	bool ApplyLastInstrument();
+	bool ApplyDrumKit(size_t nIndex);
+	void ApplyLastInstrument();
 	void SetMasterVolume(s32 nVolume);
 	void DeferSaveLastState();
 
@@ -228,7 +244,7 @@ private:
 
 	// Current menu and its selection
 	TMenu m_Menu;
-	u8 m_nParameterPage;
+	u8 m_nSetting;
 	size_t m_nMenuIndex;
 	size_t m_nMenuCurrentIndex;
 	unsigned m_nMenuTime;
@@ -236,6 +252,7 @@ private:
 
 	// Settings that are restored on startup
 	CLastState m_LastState;
+	CLastStateSaver* m_pLastStateSaver;
 	bool m_bLastStateChanged;
 	unsigned m_nLastStateChangeTime;
 

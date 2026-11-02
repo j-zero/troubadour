@@ -93,18 +93,18 @@ void CCanvas::FillRoundedRect(int nX, int nY, int nWidth, int nHeight, int nRadi
 	}
 }
 
-void CCanvas::FillArc(int nInnerRadius, int nOuterRadius, float nStartAngle, float nEndAngle, TColor Color)
+void CCanvas::FillArc(int nCenterX, int nCenterY, int nInnerRadius, int nOuterRadius, float nStartAngle, float nEndAngle, TColor Color)
 {
 	const int nInner2 = nInnerRadius * nInnerRadius;
 	const int nOuter2 = nOuterRadius * nOuterRadius;
 
-	for (int y = Utility::Max(Center - nOuterRadius, 0); y < Utility::Min(Center + nOuterRadius, Size); ++y)
+	for (int y = Utility::Max(nCenterY - nOuterRadius, 0); y < Utility::Min(nCenterY + nOuterRadius, Size); ++y)
 	{
-		for (int x = Utility::Max(Center - nOuterRadius, 0); x < Utility::Min(Center + nOuterRadius, Size); ++x)
+		for (int x = Utility::Max(nCenterX - nOuterRadius, 0); x < Utility::Min(nCenterX + nOuterRadius, Size); ++x)
 		{
 			// Distances from the center, doubled to stay on pixel centers
-			const int nDX = 2 * (x - Center) + 1;
-			const int nDY = 2 * (y - Center) + 1;
+			const int nDX = 2 * (x - nCenterX) + 1;
+			const int nDY = 2 * (y - nCenterY) + 1;
 			const int nDistance2 = nDX * nDX + nDY * nDY;
 			if (nDistance2 < 4 * nInner2 || nDistance2 >= 4 * nOuter2)
 				continue;
@@ -118,6 +118,20 @@ void CCanvas::FillArc(int nInnerRadius, int nOuterRadius, float nStartAngle, flo
 
 			if (nAngle <= nEndAngle)
 				m_pPixels[y * Size + x] = Color;
+		}
+	}
+}
+
+void CCanvas::DrawImage(const TUIImage& Image, int nX, int nY, TColor Color)
+{
+	const int nBytesPerRow = (Image.nWidth + 1) / 2;
+
+	for (int y = 0; y < Image.nHeight; ++y)
+	{
+		for (int x = 0; x < Image.nWidth; ++x)
+		{
+			const u8 nByte = Image.pData[y * nBytesPerRow + x / 2];
+			BlendPixel(nX + x, nY + y, Color, x & 1 ? nByte & 0x0F : nByte >> 4);
 		}
 	}
 }

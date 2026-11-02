@@ -28,7 +28,7 @@
 #endif
 
 CKernel::CKernel(void)
-	: CStdlibApp("mt32-pi"),
+	: CStdlibApp("Troubadour"),
 
 	  m_Serial(&mInterrupt, true),
 #ifdef HDMI_CONSOLE

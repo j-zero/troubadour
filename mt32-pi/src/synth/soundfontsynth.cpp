@@ -263,9 +263,7 @@ CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
 	  m_nCurrentSoundFontIndex(0),
 
 	  m_nSoundFontID(FLUID_FAILED),
-	  m_pPresets(nullptr),
-	  m_nPresets(0),
-	  m_nOutOfMemoryPresetIndex(0),
+	  m_PresetLists{},
 	  m_DefaultBanks{0},
 	  m_DefaultPrograms{0},
 	  m_nDefaultProgramMask(0),
@@ -277,7 +275,7 @@ CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
 
 CSoundFontSynth::~CSoundFontSynth()
 {
-	delete[] m_pPresets;
+	FreePresetLists();
 
 	if (m_pSynth)
 		delete_fluid_synth(m_pSynth);
@@ -519,9 +517,10 @@ void CSoundFontSynth::UpdateSoundFontName()
 	m_DisplayInfoLock.Release();
 }
 
-size_t CSoundFontSynth::GetChannelPresetIndex(u8 nChannel)
+size_t CSoundFontSynth::GetChannelPresetIndex(u8 nChannel, TPresetList List)
 {
 	CTaskLockHolder TaskLock(m_TaskLock);
+	const TPresets& Presets = m_PresetLists[static_cast<u8>(List)];
 
 	int nSoundFontID, nBank, nProgram;
 	m_Lock.Acquire();
@@ -531,37 +530,39 @@ size_t CSoundFontSynth::GetChannelPresetIndex(u8 nChannel)
 
 	// Continue browsing from an instrument that didn't fit into memory
 	if (bUnset)
-		return m_nOutOfMemoryPresetIndex;
+		return Presets.nOutOfMemoryIndex;
 
 	// First preset at or after the current one
-	for (size_t i = 0; i < m_nPresets; ++i)
+	for (size_t i = 0; i < Presets.nCount; ++i)
 	{
-		if (!IsPresetBefore(m_pPresets[i].nBank, m_pPresets[i].nProgram, nBank, nProgram))
+		if (!IsPresetBefore(Presets.pPresets[i].nBank, Presets.pPresets[i].nProgram, nBank, nProgram))
 			return i;
 	}
 
 	return 0;
 }
 
-bool CSoundFontSynth::GetPreset(size_t nIndex, int* pBank, int* pProgram)
+bool CSoundFontSynth::GetPreset(size_t nIndex, int* pBank, int* pProgram, TPresetList List)
 {
 	CTaskLockHolder TaskLock(m_TaskLock);
+	const TPresets& Presets = m_PresetLists[static_cast<u8>(List)];
 
-	if (nIndex >= m_nPresets)
+	if (nIndex >= Presets.nCount)
 		return false;
 
-	*pBank    = m_pPresets[nIndex].nBank;
-	*pProgram = m_pPresets[nIndex].nProgram;
+	*pBank    = Presets.pPresets[nIndex].nBank;
+	*pProgram = Presets.pPresets[nIndex].nProgram;
 	return true;
 }
 
-bool CSoundFontSynth::FindPreset(int nBank, int nProgram, size_t* pIndex)
+bool CSoundFontSynth::FindPreset(int nBank, int nProgram, size_t* pIndex, TPresetList List)
 {
 	CTaskLockHolder TaskLock(m_TaskLock);
+	const TPresets& Presets = m_PresetLists[static_cast<u8>(List)];
 
-	for (size_t i = 0; i < m_nPresets; ++i)
+	for (size_t i = 0; i < Presets.nCount; ++i)
 	{
-		if (m_pPresets[i].nBank == nBank && m_pPresets[i].nProgram == nProgram)
+		if (Presets.pPresets[i].nBank == nBank && Presets.pPresets[i].nProgram == nProgram)
 		{
 			*pIndex = i;
 			return true;
@@ -571,17 +572,18 @@ bool CSoundFontSynth::FindPreset(int nBank, int nProgram, size_t* pIndex)
 	return false;
 }
 
-void CSoundFontSynth::FormatPresetName(size_t nIndex, char* pBuffer, size_t nSize)
+void CSoundFontSynth::FormatPresetName(size_t nIndex, char* pBuffer, size_t nSize, TPresetList List)
 {
 	CTaskLockHolder TaskLock(m_TaskLock);
+	const TPresets& Presets = m_PresetLists[static_cast<u8>(List)];
 
-	if (nIndex >= m_nPresets)
+	if (nIndex >= Presets.nCount)
 	{
 		snprintf(pBuffer, nSize, "No instrument");
 		return;
 	}
 
-	const TPreset& Preset = m_pPresets[nIndex];
+	const TPreset& Preset = Presets.pPresets[nIndex];
 
 	m_Lock.Acquire();
 	fluid_sfont_t* pSoundFont = fluid_synth_get_sfont_by_id(m_pSynth, m_nSoundFontID);
@@ -590,18 +592,19 @@ void CSoundFontSynth::FormatPresetName(size_t nIndex, char* pBuffer, size_t nSiz
 	m_Lock.Release();
 }
 
-bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded)
+bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded, TPresetList List)
 {
 	CTaskLockHolder TaskLock(m_TaskLock);
 	CSampleLoadReporter LoadReporter(m_pUI);
+	TPresets& Presets = m_PresetLists[static_cast<u8>(List)];
 
 	if (pSamplesLoaded)
 		*pSamplesLoaded = false;
 
-	if (nIndex >= m_nPresets)
+	if (nIndex >= Presets.nCount)
 		return false;
 
-	const TPreset& Preset = m_pPresets[nIndex];
+	const TPreset& Preset = Presets.pPresets[nIndex];
 	const u8 nLastChannel = nFirstChannel + nChannels;
 
 	m_Lock.Acquire();
@@ -641,7 +644,7 @@ bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nCha
 	if (bOutOfMemory)
 	{
 		LOGERR("Not enough memory for instrument %d:%d", Preset.nBank, Preset.nProgram);
-		m_nOutOfMemoryPresetIndex = nIndex;
+		Presets.nOutOfMemoryIndex = nIndex;
 		for (u8 nChannel = nFirstChannel; nChannel < nLastChannel; ++nChannel)
 			fluid_synth_unset_program(m_pSynth, nChannel);
 	}
@@ -828,10 +831,7 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 	if (m_pSynth)
 		delete_fluid_synth(m_pSynth);
 
-	delete[] m_pPresets;
-	m_pPresets            = nullptr;
-	m_nPresets            = 0;
-	m_nOutOfMemoryPresetIndex = 0;
+	FreePresetLists();
 	m_nSoundFontID        = FLUID_FAILED;
 	m_nDefaultProgramMask = 0;
 
@@ -903,7 +903,7 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 		}
 		m_nDefaultProgramMask = (1 << MIDIChannels) - 1;
 
-		BuildPresetList();
+		BuildPresetLists();
 		UpdateProgramName();
 	}
 
@@ -921,37 +921,48 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 	return true;
 }
 
-void CSoundFontSynth::BuildPresetList()
+void CSoundFontSynth::BuildPresetLists()
 {
 	fluid_sfont_t* pSoundFont = fluid_synth_get_sfont_by_id(m_pSynth, m_nSoundFontID);
 	if (!pSoundFont)
 		return;
 
-	size_t nCount = 0;
+	auto GetListIndex = [](int nBank) {
+		return static_cast<u8>(nBank >= DrumBank ? TPresetList::DrumKits : TPresetList::Instruments);
+	};
+
+	size_t Counts[static_cast<u8>(TPresetList::Count)] = {};
 	fluid_sfont_iteration_start(pSoundFont);
 	while (fluid_preset_t* pPreset = fluid_sfont_iteration_next(pSoundFont))
-		if (fluid_preset_get_banknum(pPreset) < DrumBank)
-			++nCount;
+		++Counts[GetListIndex(fluid_preset_get_banknum(pPreset))];
 
-	m_pPresets = new TPreset[nCount];
+	for (u8 nList = 0; nList < static_cast<u8>(TPresetList::Count); ++nList)
+		m_PresetLists[nList] = { new TPreset[Counts[nList]], 0, 0 };
 
 	// Sorted by bank, then program, so that each bank is listed as a whole
 	fluid_sfont_iteration_start(pSoundFont);
 	while (fluid_preset_t* pPreset = fluid_sfont_iteration_next(pSoundFont))
 	{
 		const int nBank = fluid_preset_get_banknum(pPreset);
-		if (nBank >= DrumBank)
-			continue;
-
 		const TPreset Preset = { static_cast<u16>(nBank), static_cast<u8>(fluid_preset_get_num(pPreset)) };
+		TPresets& List = m_PresetLists[GetListIndex(nBank)];
 
-		size_t i = m_nPresets++;
-		while (i > 0 && IsPresetBefore(Preset.nBank, Preset.nProgram, m_pPresets[i - 1].nBank, m_pPresets[i - 1].nProgram))
+		size_t i = List.nCount++;
+		while (i > 0 && IsPresetBefore(Preset.nBank, Preset.nProgram, List.pPresets[i - 1].nBank, List.pPresets[i - 1].nProgram))
 		{
-			m_pPresets[i] = m_pPresets[i - 1];
+			List.pPresets[i] = List.pPresets[i - 1];
 			--i;
 		}
-		m_pPresets[i] = Preset;
+		List.pPresets[i] = Preset;
+	}
+}
+
+void CSoundFontSynth::FreePresetLists()
+{
+	for (TPresets& List : m_PresetLists)
+	{
+		delete[] List.pPresets;
+		List = { nullptr, 0, 0 };
 	}
 }
 

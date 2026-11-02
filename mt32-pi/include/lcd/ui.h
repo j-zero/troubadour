@@ -106,6 +106,10 @@ public:
 
 	void SetVolume(u8 nVolume) { m_nVolume = nVolume; }
 
+	// Number of MIDI channels whose levels are shown on the home screen, starting with channel 1
+	void SetDisplayChannels(u8 nChannels) { m_nDisplayChannels = nChannels; }
+	u8 GetDisplayChannels() const { return m_nDisplayChannels; }
+
 private:
 	enum class TState
 	{
@@ -121,14 +125,15 @@ private:
 		InPowerSavingMode
 	};
 
+	void DrawLogo(int nY);
 	void DrawHome(CSoundFontSynth& Synth, unsigned int nTicks);
-	void DrawChannelLevels(const float* pLevels, const float* pPeaks, int nY1, int nY2);
+	void DrawChannelLevels(const float* pLevels, const float* pPeaks, u8 nChannels, int nY1, int nY2);
+	void DrawVolume(u8 nVolume, int nY);
 	void DrawGauge(int nInnerRadius, int nOuterRadius, float nFraction, CCanvas::TColor Color);
 	void DrawMessage(const char* pMessage, CCanvas::TColor Color, bool bSpinner, unsigned int nTicks);
 	void DrawLoadProgress(u64 nLoadedBytes, u64 nTotalBytes, int nInnerRadius, int nOuterRadius, int nPercentY);
 	void DrawWrappedText(const TUIFont& Font, const char* pText, int nCenterY, CCanvas::TColor Color, size_t nMaxLines, int nRadius = CCanvas::TextRadius);
-	void DrawMenu(const TMenu& Menu, unsigned int nTicks);
-	void DrawScrollingText(const TUIFont& Font, const char* pText, int nY, CCanvas::TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth = -1);
+	void DrawMenu(const TMenu& Menu, unsigned int nTicks);	void DrawScrollingText(const TUIFont& Font, const char* pText, int nY, CCanvas::TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth = -1);
 	void DrawSysExBitmap();
 
 	static constexpr size_t SystemMessageTextBufferSize = 256;
@@ -145,6 +150,7 @@ private:
 	unsigned m_nStateTime;
 	TImage m_CurrentImage;
 	volatile u8 m_nVolume;
+	volatile u8 m_nDisplayChannels;
 
 	// Text set from another core
 	CSpinLock m_Lock;

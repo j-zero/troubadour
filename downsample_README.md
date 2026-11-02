@@ -1,62 +1,62 @@
 # downsample.py
 
-Rechnet in einer SoundFont (SF2) alle Samples mit mehr als 48 kHz auf 48 kHz herunter. Dadurch brauchen
-Instrumente mit hochaufgelösten Samples deutlich weniger RAM, ohne dass sich am Klang etwas hörbar ändert:
-mt32-pi gibt ohnehin mit 48 kHz aus, alles oberhalb von 24 kHz geht also sowieso verloren.
+Resamples every sample above 48 kHz in a SoundFont (SF2) to 48 kHz. Instruments with high-resolution samples then
+need much less RAM, with no audible change to the sound: mt32-pi outputs at 48 kHz anyway, so everything above
+24 kHz is lost regardless.
 
-Gedacht für den Raspberry Pi Zero 2 W mit dynamischem Sample-Laden (`dynamic_samples = on`): Dort muss jeweils
-das gewählte Instrument komplett in den RAM passen (etwa 440 MB).
+Intended for the Raspberry Pi Zero 2 W with dynamic sample loading (`dynamic_samples = on`): there, the selected
+instrument has to fit into RAM completely (about 440 MB).
 
-## Voraussetzungen
+## Requirements
 
 - Python 3
-- numpy und scipy (`pip install numpy scipy`, unter Ubuntu/WSL auch `sudo apt install python3-numpy python3-scipy`)
-- Freier Platz für die neue Datei und eine temporäre Datei mit den Sampledaten (jeweils etwa so groß wie die
-  neue SoundFont)
+- numpy and scipy (`pip install numpy scipy`, or on Ubuntu/WSL `sudo apt install python3-numpy python3-scipy`)
+- Free space for the new file and for a temporary file with the sample data (each about the size of the new
+  SoundFont)
 
-## Aufruf
-
-```sh
-python3 downsample.py <Eingabe.sf2> <Ausgabe.sf2>
-```
-
-Beispiel (Anführungszeichen wegen der Klammern im Dateinamen):
+## Usage
 
 ```sh
-python3 downsample.py "Realistic_Soundfont_V2_Libre_V1_(16bit)Sub2GiB_XGMS_naturalFixed.sf2" neu.sf2
+python3 downsample.py <input.sf2> <output.sf2>
 ```
 
-Die Eingabedatei wird nicht verändert. Damit die zuletzt gewählte SoundFont in `last_state.cfg` gültig bleibt,
-die neue Datei anschließend unter dem ursprünglichen Namen in den Ordner `soundfonts` der SD-Karte legen und das
-Original woanders aufheben.
+Example (quotes because of the parentheses in the file name):
 
-## Was geändert wird
+```sh
+python3 downsample.py "Realistic_Soundfont_V2_Libre_V1_(16bit)Sub2GiB_XGMS_naturalFixed.sf2" new.sf2
+```
 
-- Nur Samples mit einer Abtastrate über 48 kHz werden umgerechnet: mit einem Polyphasen-Tiefpassfilter
-  (`scipy.signal.resample_poly`, Kaiser-Fenster), danach auf 16 Bit gerundet und begrenzt.
-- Die Loop-Punkte dieser Samples werden auf die neue Rate umgerechnet (auf ganze Samples gerundet), die
-  Abtastrate im Sample-Header auf 48000 gesetzt. Grundton und Stimmung bleiben gleich.
-- Alle anderen Samples, Instrumente, Presets und Infos werden unverändert übernommen. Nach jedem Sample werden
-  wie vom SF2-Standard verlangt 46 Null-Samples eingefügt.
+The input file is not changed. So that the last selected SoundFont in `last_state.cfg` stays valid, put the new
+file into the `soundfonts` folder of the SD card under the original name afterwards, and keep the original
+somewhere else.
 
-Die Zielrate steht in `TARGET` am Anfang des Skripts.
+## What is changed
 
-## Einschränkungen
+- Only samples with a sample rate above 48 kHz are resampled: with a polyphase low-pass filter
+  (`scipy.signal.resample_poly`, Kaiser window), then rounded and clipped to 16 bits.
+- The loop points of these samples are converted to the new rate (rounded to whole samples), and the sample rate
+  in the sample header is set to 48000. Root key and tuning stay the same.
+- All other samples, instruments, presets and info are copied unchanged. As required by the SF2 specification,
+  46 zero samples are inserted after each sample.
 
-- Nur 16-Bit-SF2-Dateien: SoundFonts mit 24-Bit-Daten (`sm24`) und SF3 (komprimiert) werden nicht unterstützt.
-- Samples, deren Daten sich in der Datei überlappen, werden abgelehnt (das Skript bricht dann ab).
-- Bei sehr kurzen Loops kann das Runden der Loop-Punkte zu einem leicht hörbaren Übergang führen.
+The target rate is set by `TARGET` at the top of the script.
 
-## Ergebnis bei der Realistic SoundFont
+## Limitations
 
-`Realistic_Soundfont_V2_Libre_V1_(16bit)Sub2GiB_XGMS_naturalFixed.sf2`: 176 Samples von Riky's Grand Piano
-lagen mit 96 kHz vor.
+- 16-bit SF2 files only: SoundFonts with 24-bit data (`sm24`) and SF3 (compressed) are not supported.
+- Samples whose data overlaps in the file are rejected (the script stops).
+- With very short loops, rounding the loop points can make the loop transition slightly audible.
 
-| | vorher | nachher |
+## Result with the Realistic SoundFont
+
+`Realistic_Soundfont_V2_Libre_V1_(16bit)Sub2GiB_XGMS_naturalFixed.sf2`: 176 samples of Riky's Grand Piano were
+stored at 96 kHz.
+
+| | before | after |
 |---|---|---|
-| Riky's Grand Piano | 516 MB (passt nicht in den RAM) | 324 MB |
-| Größtes Instrument | 516 MB | 349 MB (Acoustic KSP) |
-| SoundFont-Datei | 1987 MB | 1795 MB |
+| Riky's Grand Piano | 516 MB (doesn't fit into RAM) | 324 MB |
+| Largest instrument | 516 MB | 349 MB (Acoustic KSP) |
+| SoundFont file | 1987 MB | 1795 MB |
 
-Mit FluidSynth 2.6.2 und einer Speichergrenze wie auf dem Pi geprüft: Das Piano lädt danach vollständig. Gerenderte
-Töne haben dieselbe Tonhöhe und denselben Pegel; der Unterschied zum Original liegt 61–72 dB unter dem Signal.
+Checked with FluidSynth 2.6.2 and a memory limit like on the Pi: the piano then loads completely. Rendered notes
+have the same pitch and level; the difference from the original is 61–72 dB below the signal.

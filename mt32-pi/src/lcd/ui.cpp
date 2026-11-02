@@ -49,6 +49,11 @@ constexpr TColor ColorLevelMid     = CCanvas::RGB(250, 210, 40);
 constexpr TColor ColorLevelHigh    = CCanvas::RGB(250, 70, 50);
 constexpr TColor ColorPeak         = CCanvas::RGB(255, 255, 255);
 constexpr TColor ColorPanic        = CCanvas::RGB(90, 0, 0);
+constexpr TColor ColorLogoInitial  = CCanvas::RGB(205, 40, 35);
+constexpr TColor ColorLogoText     = CCanvas::RGB(230, 185, 85);
+
+// Top of the logo on the startup screen
+constexpr int LogoY = 58;
 
 // Gauges cover 270 degrees, open at the bottom
 constexpr float GaugeStartAngle = 225.0f;
@@ -71,6 +76,7 @@ CUserInterface::CUserInterface()
 	  m_nStateTime(0),
 	  m_CurrentImage(TImage::None),
 	  m_nVolume(100),
+	  m_nDisplayChannels(MIDIChannels),
 
 	  m_Lock(TASK_LEVEL),
 	  m_SystemMessageTextBuffer{'\0'},
@@ -145,11 +151,11 @@ void CUserInterface::Update(CGC9A01& Display, CSoundFontSynth& Synth, unsigned i
 		}
 
 		case TState::DisplayingImage:
-		{
-			const u8* pImage = m_CurrentImage == TImage::MisterLogo ? MisterLogo128x32 : MT32PiLogo128x32;
-			m_pCanvas->DrawBitmap(pImage, 128, 32, CCanvas::Center - 96, CCanvas::Center - 24, 3, 2, ColorText);
+			if (m_CurrentImage == TImage::MisterLogo)
+				m_pCanvas->DrawBitmap(MisterLogo128x32, 128, 32, CCanvas::Center - 96, CCanvas::Center - 24, 3, 2, ColorText);
+			else
+				DrawLogo(CCanvas::Center - LogoText.nHeight / 2);
 			break;
-		}
 
 		case TState::DisplayingSysExText:
 			m_Lock.Acquire();
@@ -183,11 +189,11 @@ void CUserInterface::Update(CGC9A01& Display, CSoundFontSynth& Synth, unsigned i
 void CUserInterface::ShowStartup(CGC9A01& Display, const char* pVersion, const char* pStatus)
 {
 	m_pCanvas->Clear(ColorBackground);
-	m_pCanvas->DrawBitmap(MT32PiLogo128x32, 128, 32, CCanvas::Center - 96, 64, 3, 2, ColorText);
-	m_pCanvas->DrawCenteredText(FontSmall, pVersion, 118, ColorTextDim, 116);
+	DrawLogo(LogoY);
+	m_pCanvas->DrawCenteredText(FontSmall, pVersion, 130, ColorTextDim, 116);
 
 	if (pStatus && *pStatus)
-		DrawWrappedText(FontMedium, pStatus, 162, ColorAccentText, 2, 116);
+		DrawWrappedText(FontMedium, pStatus, 172, ColorAccentText, 2, 116);
 
 	Display.Update(*m_pCanvas);
 }
@@ -195,11 +201,20 @@ void CUserInterface::ShowStartup(CGC9A01& Display, const char* pVersion, const c
 void CUserInterface::ShowStartupProgress(CGC9A01& Display, const char* pVersion, u64 nLoadedBytes, u64 nTotalBytes)
 {
 	m_pCanvas->Clear(ColorBackground);
-	m_pCanvas->DrawBitmap(MT32PiLogo128x32, 128, 32, CCanvas::Center - 96, 64, 3, 2, ColorText);
-	m_pCanvas->DrawCenteredText(FontSmall, pVersion, 118, ColorTextDim, 116);
-	DrawLoadProgress(nLoadedBytes, nTotalBytes, 112, 118, 144);
+	DrawLogo(LogoY);
+	m_pCanvas->DrawCenteredText(FontSmall, pVersion, 130, ColorTextDim, 116);
+	DrawLoadProgress(nLoadedBytes, nTotalBytes, 112, 118, 152);
 
 	Display.Update(*m_pCanvas);
+}
+
+void CUserInterface::DrawLogo(int nY)
+{
+	// Like an illuminated manuscript: a red initial, the rest in gold
+	const int nX = CCanvas::Center - LogoText.nWidth / 2;
+	m_pCanvas->DrawImage(LogoInitial, nX, nY, ColorLogoInitial);
+	m_pCanvas->DrawImage(LogoText, nX, nY, ColorLogoText);
+	m_pCanvas->DrawImage(LogoSubtitle, nX, nY, ColorTextDim);
 }
 
 void CUserInterface::ShowPanic(CGC9A01& Display, const char* pMessage)
@@ -325,9 +340,6 @@ void CUserInterface::DrawHome(CSoundFontSynth& Synth, unsigned int nTicks)
 	const u8 nVolume = m_nVolume;
 	DrawGauge(113, 119, nVolume / 100.0f, ColorAccent);
 
-	// SoundFont
-	DrawScrollingText(FontSmall, Info.SoundFontName, 28, ColorTextDim, CCanvas::TextRadius, nTicks);
-
 	// Instrument of the first channels: number, then the name as large as it fits
 	if (Info.ProgramName[0])
 	{
@@ -336,39 +348,77 @@ void CUserInterface::DrawHome(CSoundFontSynth& Synth, unsigned int nTicks)
 			snprintf(Number, sizeof(Number), "%03d  Bank %d", Info.nProgram + 1, Info.nBank);
 		else
 			snprintf(Number, sizeof(Number), "%03d", Info.nProgram + 1);
-		m_pCanvas->DrawCenteredText(FontSmall, Number, 50, ColorAccentText);
+		m_pCanvas->DrawCenteredText(FontSmall, Number, 40, ColorAccentText);
 
-		const int nNameY = 76;
+		const int nNameY = 62;
 		if (m_pCanvas->GetTextWidth(FontLarge, Info.ProgramName) <= CCanvas::GetVisibleWidth(nNameY, nNameY + FontLarge.nHeight))
 			m_pCanvas->DrawCenteredText(FontLarge, Info.ProgramName, nNameY, ColorText);
 		else
 			DrawWrappedText(FontMedium, Info.ProgramName, nNameY + FontLarge.nHeight / 2, ColorText, 2);
 	}
 	else
-		m_pCanvas->DrawCenteredText(FontMedium, "No instrument", 82, ColorTextFaint);
+		m_pCanvas->DrawCenteredText(FontMedium, "No instrument", 68, ColorTextFaint);
 
 	// Channel levels
 	float Levels[MIDIChannels], Peaks[MIDIChannels];
 	Synth.GetChannelLevels(nTicks, Levels, Peaks);
-	DrawChannelLevels(Levels, Peaks, 128, 180);
+	const u8 nChannels = m_nDisplayChannels;
+	DrawChannelLevels(Levels, Peaks, Utility::Clamp<u8>(nChannels, 1, MIDIChannels), 108, 170);
 
-	// Volume as a number
-	char Volume[16];
-	snprintf(Volume, sizeof(Volume), "Vol %d", nVolume);
-	m_pCanvas->DrawCenteredText(FontSmall, Volume, 190, ColorTextDim);
+	DrawVolume(nVolume, 180);
 }
 
-void CUserInterface::DrawChannelLevels(const float* pLevels, const float* pPeaks, int nY1, int nY2)
+void CUserInterface::DrawVolume(u8 nVolume, int nY)
+{
+	// Speaker with sound waves (or a cross when muted), followed by the value
+	constexpr int nIconWidth = 23;
+	constexpr int nIconHeight = 15;
+	constexpr int nGap = 6;
+	const TColor Color = ColorTextDim;
+
+	char Text[8];
+	snprintf(Text, sizeof(Text), "%d", nVolume);
+	const int nTextWidth = m_pCanvas->GetTextWidth(FontSmall, Text);
+	const int nX = CCanvas::Center - (nIconWidth + nGap + nTextWidth) / 2;
+	const int nMiddle = nY + nIconHeight / 2;
+
+	// Body and cone
+	m_pCanvas->FillRect(nX, nMiddle - 3, 4, 7, Color);
+	for (int i = 0; i < 5; ++i)
+		m_pCanvas->FillRect(nX + 4 + i, nMiddle - 3 - i, 1, 7 + 2 * i, Color);
+
+	if (nVolume == 0)
+	{
+		for (int i = 0; i < 7; ++i)
+		{
+			m_pCanvas->FillRect(nX + 12 + i, nMiddle - 3 + i, 2, 1, Color);
+			m_pCanvas->FillRect(nX + 12 + i, nMiddle + 3 - i, 2, 1, Color);
+		}
+	}
+	else
+	{
+		m_pCanvas->FillArc(nX + 9, nMiddle + 1, 3, 5, 50.0f, 130.0f, Color);
+		if (nVolume >= 34)
+			m_pCanvas->FillArc(nX + 9, nMiddle + 1, 7, 9, 45.0f, 135.0f, Color);
+		if (nVolume >= 67)
+			m_pCanvas->FillArc(nX + 9, nMiddle + 1, 11, 13, 40.0f, 140.0f, Color);
+	}
+
+	m_pCanvas->DrawText(FontSmall, Text, nX + nIconWidth + nGap, nY, Color);
+}
+
+void CUserInterface::DrawChannelLevels(const float* pLevels, const float* pPeaks, u8 nChannels, int nY1, int nY2)
 {
 	constexpr int nSpacing = 3;
+	constexpr int nMaxBarWidth = 24;
 
 	const int nAreaWidth = CCanvas::GetVisibleWidth(nY1, nY2, 106);
-	const int nBarWidth = (nAreaWidth - (MIDIChannels - 1) * nSpacing) / MIDIChannels;
-	const int nTotalWidth = nBarWidth * MIDIChannels + (MIDIChannels - 1) * nSpacing;
+	const int nBarWidth = Utility::Min((nAreaWidth - (nChannels - 1) * nSpacing) / nChannels, nMaxBarWidth);
+	const int nTotalWidth = nBarWidth * nChannels + (nChannels - 1) * nSpacing;
 	const int nX0 = CCanvas::Center - nTotalWidth / 2;
 	const int nHeight = nY2 - nY1;
 
-	for (u8 nChannel = 0; nChannel < MIDIChannels; ++nChannel)
+	for (u8 nChannel = 0; nChannel < nChannels; ++nChannel)
 	{
 		const int nX = nX0 + nChannel * (nBarWidth + nSpacing);
 		const int nLevel = Utility::Clamp(static_cast<int>(pLevels[nChannel] * nHeight), 0, nHeight);
@@ -530,7 +580,7 @@ void CUserInterface::DrawMenu(const TMenu& Menu, unsigned int nTicks)
 	constexpr int nSelectionHeight = 32;
 	constexpr int nMiddleY = 128;
 
-	m_pCanvas->DrawCenteredText(FontSmall, Menu.Title, 30, ColorAccentText, 118);
+	DrawScrollingText(FontSmall, Menu.Title, 30, ColorAccentText, 118, nTicks);
 
 	for (size_t nRow = 0; nRow < TMenu::ListRows; ++nRow)
 	{

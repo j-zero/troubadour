@@ -97,14 +97,25 @@ public:
 	size_t GetSoundFontIndex() const { return m_nCurrentSoundFontIndex; }
 	CSoundFontManager& GetSoundFontManager() { return m_SoundFontManager; }
 
-	// Melodic presets of the current SoundFont, for selecting an instrument on several channels at once
-	size_t GetPresetCount() const { return m_nPresets; }
-	size_t GetChannelPresetIndex(u8 nChannel);
-	bool GetPreset(size_t nIndex, int* pBank, int* pProgram);
-	bool FindPreset(int nBank, int nProgram, size_t* pIndex);
-	void FormatPresetName(size_t nIndex, char* pBuffer, size_t nSize);
+	// Presets of the current SoundFont, for selecting an instrument on several channels at once: the melodic
+	// instruments, or the drum kits (bank 128) for the drum channel
+	enum class TPresetList : u8
+	{
+		Instruments,
+		DrumKits,
+		Count
+	};
+
+	static constexpr u8 DrumChannel = 9;
+
+	size_t GetPresetCount(TPresetList List = TPresetList::Instruments) const { return m_PresetLists[static_cast<u8>(List)].nCount; }
+	size_t GetChannelPresetIndex(u8 nChannel, TPresetList List = TPresetList::Instruments);
+	bool GetPreset(size_t nIndex, int* pBank, int* pProgram, TPresetList List = TPresetList::Instruments);
+	bool FindPreset(int nBank, int nProgram, size_t* pIndex, TPresetList List = TPresetList::Instruments);
+	void FormatPresetName(size_t nIndex, char* pBuffer, size_t nSize, TPresetList List = TPresetList::Instruments);
 	// Returns false if the instrument didn't fit into memory; the channels have no instrument then
-	bool SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded = nullptr);
+	bool SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded = nullptr,
+			       TPresetList List = TPresetList::Instruments);
 
 	// Effect values set here take precedence over the SoundFont's effects profile and the config file, also
 	// after switching SoundFonts. Setting the reverb or chorus level to 0 turns the effect off.
@@ -121,11 +132,19 @@ private:
 		u8 nProgram;
 	};
 
+	struct TPresets
+	{
+		TPreset* pPresets;
+		size_t nCount;
+		size_t nOutOfMemoryIndex;	// Instrument that didn't fit into memory, to continue browsing from
+	};
+
 	static constexpr u8 MIDIChannels = 16;
 	static constexpr int DrumBank = 128;
 
 	// Must be called with the synth lock held
-	void BuildPresetList();
+	void BuildPresetLists();
+	void FreePresetLists();
 	void LoadDefaultProgram(u8 nChannel);
 	void UpdateDefaultPrograms();
 	void UpdateProgramName();
@@ -158,9 +177,7 @@ private:
 	CString m_InitialSoundFontPath;
 
 	int m_nSoundFontID;
-	TPreset* m_pPresets;
-	size_t m_nPresets;
-	size_t m_nOutOfMemoryPresetIndex;
+	TPresets m_PresetLists[static_cast<u8>(TPresetList::Count)];
 
 	// Channels whose default program hasn't been loaded yet
 	int m_DefaultBanks[MIDIChannels];

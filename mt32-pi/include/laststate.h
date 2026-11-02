@@ -23,6 +23,8 @@
 #ifndef _laststate_h
 #define _laststate_h
 
+#include <circle/sched/synchronizationevent.h>
+#include <circle/sched/task.h>
 #include <circle/string.h>
 
 #include "synth/fxprofile.h"
@@ -39,7 +41,10 @@ public:
 	CString SoundFontPath;	// Empty if not set
 	int nBank;		// Instrument for the button channels; -1 if not set
 	int nProgram;
+	int nDrumBank;		// Drum kit on MIDI channel 10; -1 if not set
+	int nDrumProgram;
 	int nVolume;		// -1 if not set
+	int nDisplayChannels;	// Channels shown on the home screen; -1 if not set
 	TFXProfile Effects;	// Reverb and chorus settings that were changed
 
 private:
@@ -49,6 +54,24 @@ private:
 	CString m_SavedText;
 
 	static int INIHandler(void* pUser, const char* pSection, const char* pName, const char* pValue);
+};
+
+// Saves the settings in a task of its own: writing to the SD card takes a while, and the SD card driver lets other
+// tasks run in the meantime, so the main task keeps handling MIDI instead of waiting for it
+class CLastStateSaver : public CTask
+{
+public:
+	CLastStateSaver(CLastState& State, const char* pPath);
+
+	// Saves the settings as they are when the task gets to run
+	void Trigger() { m_Event.Set(); }
+
+	virtual void Run() override;
+
+private:
+	CLastState& m_State;
+	const char* m_pPath;
+	CSynchronizationEvent m_Event;
 };
 
 #endif

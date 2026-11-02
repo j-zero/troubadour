@@ -15,6 +15,7 @@ OBJS		:=	src/config.o \
 			src/lcd/canvas.o \
 			src/lcd/drivers/gc9a01.o \
 			src/lcd/fonts.o \
+			src/lcd/logo.o \
 			src/lcd/ui.o \
 			src/main.o \
 			src/midimonitor.o \

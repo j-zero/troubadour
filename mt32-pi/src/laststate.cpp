@@ -35,7 +35,10 @@ const char StateSection[] = "state";
 CLastState::CLastState()
 	: nBank(-1),
 	  nProgram(-1),
-	  nVolume(-1)
+	  nDrumBank(-1),
+	  nDrumProgram(-1),
+	  nVolume(-1),
+	  nDisplayChannels(-1)
 {
 }
 
@@ -69,6 +72,10 @@ bool CLastState::Load(const char* pPath)
 	// An instrument needs both values
 	if (nBank < 0 || nProgram < 0 || nProgram > 127)
 		nBank = nProgram = -1;
+	if (nDrumBank < 0 || nDrumProgram < 0 || nDrumProgram > 127)
+		nDrumBank = nDrumProgram = -1;
+	if (nDisplayChannels < 1 || nDisplayChannels > 16)
+		nDisplayChannels = -1;
 
 	Format(m_SavedText);
 
@@ -117,7 +124,9 @@ void CLastState::Format(CString& Text) const
 	       "# soundfont: path of the SoundFont\n"
 	       "# bank:      bank of the instrument on MIDI channels 1-6\n"
 	       "# program:   program number (0-127) of the instrument on MIDI channels 1-6\n"
+	       "# drum_bank, drum_program: drum kit on MIDI channel 10\n"
 	       "# volume:    master volume (0-100)\n"
+	       "# display_channels: number of channels shown on the home screen (1-16)\n"
 	       "# reverb_*, chorus_*: effect settings, as in mt32-pi.cfg\n";
 
 	Line.Format("[%s]\n", StateSection);
@@ -135,9 +144,21 @@ void CLastState::Format(CString& Text) const
 		Text.Append(Line);
 	}
 
+	if (nDrumProgram >= 0)
+	{
+		Line.Format("drum_bank = %d\ndrum_program = %d\n", nDrumBank, nDrumProgram);
+		Text.Append(Line);
+	}
+
 	if (nVolume >= 0)
 	{
 		Line.Format("volume = %d\n", nVolume);
+		Text.Append(Line);
+	}
+
+	if (nDisplayChannels >= 0)
+	{
+		Line.Format("display_channels = %d\n", nDisplayChannels);
 		Text.Append(Line);
 	}
 
@@ -175,6 +196,24 @@ void CLastState::Format(CString& Text) const
 	#undef FORMAT_FLOAT
 }
 
+CLastStateSaver::CLastStateSaver(CLastState& State, const char* pPath)
+	: m_State(State),
+	  m_pPath(pPath)
+{
+}
+
+void CLastStateSaver::Run()
+{
+	while (true)
+	{
+		m_Event.Wait();
+		m_Event.Clear();
+
+		// Tasks only switch while the file is being written, after the text has been made from the settings
+		m_State.Save(m_pPath);
+	}
+}
+
 int CLastState::INIHandler(void* pUser, const char* pSection, const char* pName, const char* pValue)
 {
 	CLastState* const pState = static_cast<CLastState*>(pUser);
@@ -188,8 +227,14 @@ int CLastState::INIHandler(void* pUser, const char* pSection, const char* pName,
 		return CConfig::ParseOption(pValue, &pState->nBank);
 	if (!strcmp(pName, "program"))
 		return CConfig::ParseOption(pValue, &pState->nProgram);
+	if (!strcmp(pName, "drum_bank"))
+		return CConfig::ParseOption(pValue, &pState->nDrumBank);
+	if (!strcmp(pName, "drum_program"))
+		return CConfig::ParseOption(pValue, &pState->nDrumProgram);
 	if (!strcmp(pName, "volume"))
 		return CConfig::ParseOption(pValue, &pState->nVolume);
+	if (!strcmp(pName, "display_channels"))
+		return CConfig::ParseOption(pValue, &pState->nDisplayChannels);
 
 	#define MATCH(NAME, TYPE, MEMBER)                          \
 		if (!strcmp(NAME, pName))                          \

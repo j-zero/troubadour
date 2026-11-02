@@ -33,9 +33,8 @@
 #include "lcd/ui.h"
 #include "mt32pi.h"
 
-#define MT32_PI_NAME "mt32-pi"
+#define MT32_PI_NAME "Troubadour"
 LOGMODULE(MT32_PI_NAME);
-const char MT32PiFullName[] = MT32_PI_NAME " " MT32_PI_VERSION;
 
 const char WLANFirmwarePath[] = "SD:firmware/";
 const char WLANConfigFile[]   = "SD:wpa_supplicant.conf";
@@ -102,12 +101,13 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_bFootswitchRepeated(false),
 
 	  m_Menu(TMenu::None),
-	  m_nParameterPage(ParameterPageVolume),
+	  m_nSetting(SettingVolume),
 	  m_nMenuIndex(0),
 	  m_nMenuCurrentIndex(0),
 	  m_nMenuTime(0),
 	  m_nLastParameterTurnTime(0),
 
+	  m_pLastStateSaver(nullptr),
 	  m_bLastStateChanged(false),
 	  m_nLastStateChangeTime(0),
 
@@ -160,7 +160,7 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 			CLogger::Get()->RegisterPanicHandler(PanicHandler);
 
 			// Splash screen
-			m_UserInterface.ShowStartup(*m_pDisplay, MT32PiFullName, nullptr);
+			m_UserInterface.ShowStartup(*m_pDisplay, MT32_PI_VERSION, nullptr);
 		}
 		else
 		{
@@ -280,6 +280,7 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 
 	if (m_LastState.Load(LastStateFile))
 		LOGNOTE("Restoring settings from '%s'", LastStateFile);
+	m_pLastStateSaver = new CLastStateSaver(m_LastState, LastStateFile);
 
 	LCDLog(TLCDLogType::Startup, "Loading SoundFont");
 	CSoundFontSynth::SetLoadProgressHandler(LoadProgressHandler, this);
@@ -387,7 +388,10 @@ void CMT32Pi::RestoreLastState()
 		m_UserInterface.SetVolume(m_nMasterVolume);
 	}
 
-	if (m_LastState.nProgram >= 0)
+	if (m_LastState.nDisplayChannels > 0)
+		m_UserInterface.SetDisplayChannels(m_LastState.nDisplayChannels);
+
+	if (m_LastState.nProgram >= 0 || m_LastState.nDrumProgram >= 0)
 	{
 		LCDLog(TLCDLogType::Startup, "Loading instrument");
 		ApplyLastInstrument();
@@ -471,7 +475,7 @@ void CMT32Pi::MainTask()
 		if (m_bLastStateChanged && (nTicks - m_nLastStateChangeTime) >= MSEC2HZ(LastStateSaveDelayMillis))
 		{
 			m_bLastStateChanged = false;
-			m_LastState.Save(LastStateFile);
+			m_pLastStateSaver->Trigger();
 		}
 
 		// Check for USB PnP events
@@ -1001,45 +1005,47 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 			LCDLog(TLCDLogType::Notice, "Volume: %d", m_nMasterVolume);
 			break;
 
-		// Select the highlighted instrument, or open the list
+		// Instrument list: select the highlighted instrument; settings list: open the highlighted setting; a
+		// setting: back to the settings list
 		case TButton::EncoderButton:
 			if (Event.bRepeat)
 				break;
 
 			if (m_Menu == TMenu::Instruments)
 				SelectMenuInstrument();
+			else if (m_Menu == TMenu::Settings)
+				OpenSetting(static_cast<u8>(m_nMenuIndex));
+			else if (m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts)
+				OpenMenu(TMenu::Settings);
 			else
 				OpenMenu(TMenu::Instruments);
 			break;
 
-		// Next parameter; in the SoundFont list, load the highlighted SoundFont if it isn't the current one
+		// Open or close the settings list; in a setting, back to the settings list, loading the highlighted
+		// drum kit/SoundFont if it isn't the current one
 		case TButton::Encoder2Button:
 			if (Event.bRepeat)
 				break;
 
-			if (m_Menu == TMenu::SoundFonts && m_nMenuIndex != m_pSoundFontSynth->GetSoundFontIndex())
+			if (m_Menu == TMenu::SoundFonts && m_nMenuIndex != m_nMenuCurrentIndex)
 			{
+				// The SoundFont's name is shown once it has loaded
 				CloseMenu();
 				m_bDeferredSoundFontSwitchFlag = false;
 				SwitchSoundFont(m_nMenuIndex);
 			}
-			else if (m_Menu == TMenu::SoundFonts)
+			else if (m_Menu == TMenu::DrumKits && m_nMenuIndex != m_nMenuCurrentIndex)
 			{
-				m_nParameterPage = ParameterPageVolume;
-				OpenMenu(TMenu::Parameter);
-			}
-			else if (m_Menu == TMenu::Parameter)
-			{
-				if (++m_nParameterPage < ParameterPageCount)
-					OpenMenu(TMenu::Parameter);
+				// Leave an error message visible
+				if (ApplyDrumKit(m_nMenuIndex))
+					OpenMenu(TMenu::Settings);
 				else
-					OpenMenu(TMenu::SoundFonts);
+					CloseMenu();
 			}
+			else if (m_Menu == TMenu::Settings)
+				CloseMenu();
 			else
-			{
-				m_nParameterPage = ParameterPageVolume;
-				OpenMenu(TMenu::Parameter);
-			}
+				OpenMenu(TMenu::Settings);
 			break;
 
 		default:
@@ -1090,39 +1096,116 @@ void CMT32Pi::ProcessFootswitchEvent(const TButtonEvent& Event)
 
 void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
 {
+	const bool bInSetting = m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts;
+
 	if (Event.nEncoder == 0)
 	{
-		// Turning the first encoder browses the instruments
-		MoveInstrumentSelection(Event.nDelta);
+		// The first encoder moves through the settings list (going back to it from a setting), otherwise
+		// through the instruments
+		if (m_Menu == TMenu::Settings)
+			MoveListSelection(Event.nDelta);
+		else if (bInSetting)
+			OpenMenu(TMenu::Settings);
+		else
+			MoveInstrumentSelection(Event.nDelta);
 		return;
 	}
 
-	if (m_Menu == TMenu::SoundFonts)
-	{
-		const size_t nSoundFonts = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
-		if (nSoundFonts)
-			m_nMenuIndex = (m_nMenuIndex + nSoundFonts + Event.nDelta % static_cast<int>(nSoundFonts)) % nSoundFonts;
-	}
-	else
-	{
-		// Turning the second encoder changes the volume unless another parameter was selected
-		if (m_Menu != TMenu::Parameter)
-		{
-			m_nParameterPage = ParameterPageVolume;
-			OpenMenu(TMenu::Parameter);
-		}
+	// The second encoder changes the value of the setting that is open or highlighted, or else the volume
+	if (m_Menu == TMenu::Settings)
+		OpenSetting(static_cast<u8>(m_nMenuIndex));
+	else if (!bInSetting)
+		OpenSetting(SettingVolume);
 
-		// Values have many steps, so turning quickly makes bigger steps; lists always move by one per detent
-		const unsigned int nTicks = CTimer::GetClockTicks();
-		const unsigned int nInterval = nTicks - m_nLastParameterTurnTime;
-		const int nFactor = nInterval < ParameterFastTurnMicros ? 4 : nInterval < ParameterMediumTurnMicros ? 2 : 1;
-		m_nLastParameterTurnTime = nTicks;
-
-		ChangeParameter(Event.nDelta * nFactor);
+	if (m_Menu == TMenu::SoundFonts || m_Menu == TMenu::DrumKits)
+	{
+		MoveListSelection(Event.nDelta);
+		return;
 	}
+
+	if (m_Menu != TMenu::Parameter)
+		return;
+
+	// Values have many steps, so turning quickly makes bigger steps; lists always move by one per detent
+	const unsigned int nTicks = CTimer::GetClockTicks();
+	const unsigned int nInterval = nTicks - m_nLastParameterTurnTime;
+	const int nFactor = nInterval < ParameterFastTurnMicros ? 4 : nInterval < ParameterMediumTurnMicros ? 2 : 1;
+	m_nLastParameterTurnTime = nTicks;
+
+	// The number of channels has few steps
+	ChangeParameter(m_nSetting == SettingChannels ? Event.nDelta : Event.nDelta * nFactor);
 
 	m_nMenuTime = m_pTimer->GetTicks();
 	UpdateMenu();
+}
+
+void CMT32Pi::OpenSetting(u8 nSetting)
+{
+	m_nSetting = nSetting;
+
+	if (nSetting == SettingSoundFont)
+		OpenMenu(TMenu::SoundFonts);
+	else if (nSetting != SettingDrumKit)
+		OpenMenu(TMenu::Parameter);
+	else if (m_pSoundFontSynth->GetPresetCount(CSoundFontSynth::TPresetList::DrumKits))
+		OpenMenu(TMenu::DrumKits);
+	else
+	{
+		CloseMenu();
+		LCDLog(TLCDLogType::Warning, "No drum kits!");
+	}
+}
+
+const char* CMT32Pi::GetSettingName(u8 nSetting) const
+{
+	switch (nSetting)
+	{
+		case SettingVolume:	return "Volume";
+		case SettingChannels:	return "Channels shown";
+		case SettingDrumKit:	return "Drum kit";
+		case SettingSoundFont:	return "SoundFont";
+		default:		return CSoundFontSynth::GetEffectInfo(static_cast<CSoundFontSynth::TEffect>(nSetting - SettingEffects)).pName;
+	}
+}
+
+void CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction)
+{
+	using TPresetList = CSoundFontSynth::TPresetList;
+	float nFraction = 0.0f;
+
+	if (nSetting == SettingVolume)
+	{
+		snprintf(pBuffer, nSize, "%d", m_nMasterVolume);
+		nFraction = m_nMasterVolume / 100.0f;
+	}
+	else if (nSetting == SettingChannels)
+	{
+		const u8 nChannels = m_UserInterface.GetDisplayChannels();
+		snprintf(pBuffer, nSize, "%d", nChannels);
+		nFraction = static_cast<float>(nChannels) / MaxDisplayChannels;
+	}
+	else if (nSetting == SettingDrumKit)
+	{
+		const size_t nIndex = m_pSoundFontSynth->GetChannelPresetIndex(CSoundFontSynth::DrumChannel, TPresetList::DrumKits);
+		m_pSoundFontSynth->FormatPresetName(nIndex, pBuffer, nSize, TPresetList::DrumKits);
+	}
+	else if (nSetting == SettingSoundFont)
+	{
+		const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(m_pSoundFontSynth->GetSoundFontIndex());
+		snprintf(pBuffer, nSize, "%s", pName ? pName : "-");
+	}
+	else
+	{
+		const auto Effect = static_cast<CSoundFontSynth::TEffect>(nSetting - SettingEffects);
+		const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
+		const float nValue = m_pSoundFontSynth->GetEffect(Effect);
+
+		snprintf(pBuffer, nSize, "%.*f", Info.nDecimals, nValue);
+		nFraction = (nValue - Info.nMin) / (Info.nMax - Info.nMin);
+	}
+
+	if (pFraction)
+		*pFraction = nFraction;
 }
 
 void CMT32Pi::OpenMenu(TMenu Menu)
@@ -1132,6 +1215,14 @@ void CMT32Pi::OpenMenu(TMenu Menu)
 
 	if (Menu == TMenu::Instruments)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(0);
+	else if (Menu == TMenu::Settings)
+	{
+		// The setting that was open last is highlighted; no item is "in use"
+		m_nMenuIndex = m_nSetting;
+		m_nMenuCurrentIndex = SettingCount;
+	}
+	else if (Menu == TMenu::DrumKits)
+		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(CSoundFontSynth::DrumChannel, CSoundFontSynth::TPresetList::DrumKits);
 	else if (Menu == TMenu::SoundFonts)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetSoundFontIndex();
 
@@ -1141,7 +1232,6 @@ void CMT32Pi::OpenMenu(TMenu Menu)
 void CMT32Pi::CloseMenu()
 {
 	m_Menu = TMenu::None;
-	m_nParameterPage = ParameterPageVolume;
 	m_UserInterface.HideMenu();
 }
 
@@ -1157,37 +1247,34 @@ void CMT32Pi::UpdateMenu()
 	{
 		// Name and value with a gauge
 		Menu.Type = CUserInterface::TMenu::TType::Parameter;
-		Menu.nPage = m_nParameterPage + 1;
-		Menu.nPages = ParameterPageCount + 1;
-
-		if (m_nParameterPage == ParameterPageVolume)
-		{
-			snprintf(Menu.Title, sizeof(Menu.Title), "Volume");
-			snprintf(Menu.Value, sizeof(Menu.Value), "%d", m_nMasterVolume);
-			Menu.nFraction = m_nMasterVolume / 100.0f;
-		}
-		else
-		{
-			const auto Effect = static_cast<CSoundFontSynth::TEffect>(m_nParameterPage - 1);
-			const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
-			const float nValue = m_pSoundFontSynth->GetEffect(Effect);
-
-			snprintf(Menu.Title, sizeof(Menu.Title), "%s", Info.pName);
-			snprintf(Menu.Value, sizeof(Menu.Value), "%.*f", Info.nDecimals, nValue);
-			Menu.nFraction = (nValue - Info.nMin) / (Info.nMax - Info.nMin);
-		}
+		Menu.nPage = m_nSetting + 1;
+		Menu.nPages = SettingCount;
+		snprintf(Menu.Title, sizeof(Menu.Title), "%s", GetSettingName(m_nSetting));
+		FormatSettingValue(m_nSetting, Menu.Value, sizeof(Menu.Value), &Menu.nFraction);
 
 		m_UserInterface.ShowMenu(Menu);
 		return;
 	}
 
 	// List with the selection in the middle row
-	const bool bInstruments = m_Menu == TMenu::Instruments;
-	const size_t nCount = bInstruments ? m_pSoundFontSynth->GetPresetCount() : m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
+	using TPresetList = CSoundFontSynth::TPresetList;
+	const size_t nCount = GetMenuListCount();
 	constexpr int nSelectedRow = CUserInterface::TMenu::SelectedRow;
 
 	Menu.Type = CUserInterface::TMenu::TType::List;
-	snprintf(Menu.Title, sizeof(Menu.Title), "%s %d/%d", bInstruments ? "Instrument" : "SoundFont", static_cast<int>(m_nMenuIndex + 1), static_cast<int>(nCount));
+	if (m_Menu == TMenu::Instruments)
+	{
+		// The SoundFont the instruments are from
+		const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(m_pSoundFontSynth->GetSoundFontIndex());
+		snprintf(Menu.Title, sizeof(Menu.Title), "%s", pName ? pName : "Instrument");
+	}
+	else if (m_Menu == TMenu::Settings)
+		snprintf(Menu.Title, sizeof(Menu.Title), "Settings");
+	else
+	{
+		const char* const pTitle = m_Menu == TMenu::DrumKits ? "Drum kit" : "SoundFont";
+		snprintf(Menu.Title, sizeof(Menu.Title), "%s %d/%d", pTitle, static_cast<int>(m_nMenuIndex + 1), static_cast<int>(nCount));
+	}
 
 	for (int nRow = 0; nRow < static_cast<int>(CUserInterface::TMenu::ListRows); ++nRow)
 	{
@@ -1196,8 +1283,17 @@ void CMT32Pi::UpdateMenu()
 			continue;
 
 		char* pRow = Menu.Rows[nRow];
-		if (bInstruments)
+		if (m_Menu == TMenu::Instruments)
 			m_pSoundFontSynth->FormatPresetName(nIndex, pRow, sizeof(Menu.Rows[nRow]));
+		else if (m_Menu == TMenu::DrumKits)
+			m_pSoundFontSynth->FormatPresetName(nIndex, pRow, sizeof(Menu.Rows[nRow]), TPresetList::DrumKits);
+		else if (m_Menu == TMenu::Settings)
+		{
+			// Name and current value, which is shortened if needed
+			snprintf(pRow, sizeof(Menu.Rows[nRow]), "%s: ", GetSettingName(static_cast<u8>(nIndex)));
+			const size_t nLength = strlen(pRow);
+			FormatSettingValue(static_cast<u8>(nIndex), pRow + nLength, sizeof(Menu.Rows[nRow]) - nLength);
+		}
 		else
 		{
 			const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(nIndex);
@@ -1211,22 +1307,55 @@ void CMT32Pi::UpdateMenu()
 	m_UserInterface.ShowMenu(Menu);
 }
 
+size_t CMT32Pi::GetMenuListCount() const
+{
+	switch (m_Menu)
+	{
+		case TMenu::Instruments:
+			return m_pSoundFontSynth->GetPresetCount();
+
+		case TMenu::Settings:
+			return SettingCount;
+
+		case TMenu::DrumKits:
+			return m_pSoundFontSynth->GetPresetCount(CSoundFontSynth::TPresetList::DrumKits);
+
+		case TMenu::SoundFonts:
+			return m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
+
+		default:
+			return 0;
+	}
+}
+
+void CMT32Pi::MoveListSelection(int nDelta)
+{
+	const size_t nCount = GetMenuListCount();
+	if (!nCount)
+	{
+		CloseMenu();
+		LCDLog(TLCDLogType::Error, "Nothing to select!");
+		return;
+	}
+
+	m_nMenuIndex = (m_nMenuIndex + nCount + nDelta % static_cast<int>(nCount)) % nCount;
+	m_nMenuTime = m_pTimer->GetTicks();
+	UpdateMenu();
+}
+
 void CMT32Pi::MoveInstrumentSelection(int nDelta)
 {
 	if (m_Menu != TMenu::Instruments)
 		OpenMenu(TMenu::Instruments);
 
-	const size_t nPresets = m_pSoundFontSynth->GetPresetCount();
-	if (!nPresets)
+	if (!m_pSoundFontSynth->GetPresetCount())
 	{
 		CloseMenu();
 		LCDLog(TLCDLogType::Error, "No instruments!");
 		return;
 	}
 
-	m_nMenuIndex = (m_nMenuIndex + nPresets + nDelta % static_cast<int>(nPresets)) % nPresets;
-	m_nMenuTime = m_pTimer->GetTicks();
-	UpdateMenu();
+	MoveListSelection(nDelta);
 }
 
 void CMT32Pi::SelectMenuInstrument()
@@ -1237,13 +1366,22 @@ void CMT32Pi::SelectMenuInstrument()
 
 void CMT32Pi::ChangeParameter(int nDelta)
 {
-	if (m_nParameterPage == ParameterPageVolume)
+	if (m_nSetting == SettingVolume)
 	{
 		SetMasterVolume(m_nMasterVolume + nDelta);
 		return;
 	}
 
-	const auto Effect = static_cast<CSoundFontSynth::TEffect>(m_nParameterPage - 1);
+	if (m_nSetting == SettingChannels)
+	{
+		const int nChannels = Utility::Clamp(m_UserInterface.GetDisplayChannels() + nDelta, 1, static_cast<int>(MaxDisplayChannels));
+		m_UserInterface.SetDisplayChannels(nChannels);
+		m_LastState.nDisplayChannels = nChannels;
+		DeferSaveLastState();
+		return;
+	}
+
+	const auto Effect = static_cast<CSoundFontSynth::TEffect>(m_nSetting - SettingEffects);
 	const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
 
 	// Move in whole steps from the current value, so that values stay on the step grid
@@ -1274,14 +1412,23 @@ void CMT32Pi::SwitchSoundFont(size_t nIndex)
 	}
 }
 
-bool CMT32Pi::ApplyLastInstrument()
+void CMT32Pi::ApplyLastInstrument()
 {
+	using TPresetList = CSoundFontSynth::TPresetList;
 	size_t nIndex;
-	if (m_LastState.nProgram < 0 || !m_pSoundFontSynth->FindPreset(m_LastState.nBank, m_LastState.nProgram, &nIndex))
-		return false;
 
-	LOGNOTE("Selecting instrument %d:%d", m_LastState.nBank, m_LastState.nProgram);
-	return m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels);
+	// Only if the SoundFont has them
+	if (m_LastState.nProgram >= 0 && m_pSoundFontSynth->FindPreset(m_LastState.nBank, m_LastState.nProgram, &nIndex))
+	{
+		LOGNOTE("Selecting instrument %d:%d", m_LastState.nBank, m_LastState.nProgram);
+		m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels);
+	}
+
+	if (m_LastState.nDrumProgram >= 0 && m_pSoundFontSynth->FindPreset(m_LastState.nDrumBank, m_LastState.nDrumProgram, &nIndex, TPresetList::DrumKits))
+	{
+		LOGNOTE("Selecting drum kit %d:%d", m_LastState.nDrumBank, m_LastState.nDrumProgram);
+		m_pSoundFontSynth->SetChannelsPreset(nIndex, CSoundFontSynth::DrumChannel, 1, nullptr, TPresetList::DrumKits);
+	}
 }
 
 void CMT32Pi::ApplyProgramChange(size_t nIndex)
@@ -1299,6 +1446,25 @@ void CMT32Pi::ApplyProgramChange(size_t nIndex)
 		DeferSaveLastState();
 
 	Awaken();
+}
+
+bool CMT32Pi::ApplyDrumKit(size_t nIndex)
+{
+	using TPresetList = CSoundFontSynth::TPresetList;
+
+	bool bSamplesLoaded;
+	const bool bResult = m_pSoundFontSynth->SetChannelsPreset(nIndex, CSoundFontSynth::DrumChannel, 1, &bSamplesLoaded, TPresetList::DrumKits);
+
+	if (bSamplesLoaded)
+		PurgeMIDIBuffers();
+
+	if (!bResult)
+		LCDLog(TLCDLogType::Error, "Out of memory!");
+	else if (m_pSoundFontSynth->GetPreset(nIndex, &m_LastState.nDrumBank, &m_LastState.nDrumProgram, TPresetList::DrumKits))
+		DeferSaveLastState();
+
+	Awaken();
+	return bResult;
 }
 
 void CMT32Pi::DeferSwitchSoundFont(size_t nIndex)
@@ -1349,7 +1515,7 @@ void CMT32Pi::LCDLog(TLCDLogType Type, const char* pFormat...)
 	if (Type == TLCDLogType::Startup)
 	{
 		if (!m_bStartupDone)
-			m_UserInterface.ShowStartup(*m_pDisplay, MT32PiFullName, Buffer);
+			m_UserInterface.ShowStartup(*m_pDisplay, MT32_PI_VERSION, Buffer);
 		return;
 	}
 
@@ -1425,7 +1591,7 @@ void CMT32Pi::LoadProgressHandler(u64 nLoadedBytes, u64 nTotalBytes, void* pCont
 	if (pThis->m_bStartupDone)
 		pThis->m_UserInterface.ShowLoadProgress(nLoadedBytes, nTotalBytes);
 	else
-		pThis->m_UserInterface.ShowStartupProgress(*pThis->m_pDisplay, MT32PiFullName, nLoadedBytes, nTotalBytes);
+		pThis->m_UserInterface.ShowStartupProgress(*pThis->m_pDisplay, MT32_PI_VERSION, nLoadedBytes, nTotalBytes);
 }
 
 void CMT32Pi::PanicHandler()

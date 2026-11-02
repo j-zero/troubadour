@@ -26,6 +26,7 @@
 #include <circle/types.h>
 
 #include "lcd/fonts.h"
+#include "lcd/logo.h"
 
 // Colour framebuffer of the round 240x240 display
 class CCanvas
@@ -65,8 +66,15 @@ public:
 	void FillRect(int nX, int nY, int nWidth, int nHeight, TColor Color);
 	void FillRoundedRect(int nX, int nY, int nWidth, int nHeight, int nRadius, TColor Color);
 
-	// Ring segment around the center, clockwise from nStartAngle to nEndAngle (degrees; 0 = top)
-	void FillArc(int nInnerRadius, int nOuterRadius, float nStartAngle, float nEndAngle, TColor Color);
+	// Ring segment around the center (or the given point), clockwise from nStartAngle to nEndAngle (degrees; 0 = top)
+	void FillArc(int nInnerRadius, int nOuterRadius, float nStartAngle, float nEndAngle, TColor Color)
+	{
+		FillArc(Center, Center, nInnerRadius, nOuterRadius, nStartAngle, nEndAngle, Color);
+	}
+	void FillArc(int nCenterX, int nCenterY, int nInnerRadius, int nOuterRadius, float nStartAngle, float nEndAngle, TColor Color);
+
+	// Anti-aliased image, in the given colour
+	void DrawImage(const TUIImage& Image, int nX, int nY, TColor Color);
 
 	// 1 bit per pixel image (rows, most significant bit first), scaled by nScale/nDivisor
 	void DrawBitmap(const u8* pBitmap, int nWidth, int nHeight, int nX, int nY, int nScale, int nDivisor, TColor Color);

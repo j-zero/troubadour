@@ -26,7 +26,6 @@
 #include <circle/spinlock.h>
 #include <circle/types.h>
 
-#include "lcd/lcd.h"
 #include "lcd/ui.h"
 #include "midimonitor.h"
 
@@ -51,7 +50,7 @@ public:
 	virtual size_t Render(s16* pOutBuffer, size_t nFrames) = 0;
 	virtual size_t Render(float* pOutBuffer, size_t nFrames) = 0;
 	virtual void ReportStatus() const = 0;
-	virtual void UpdateLCD(CLCD& LCD, unsigned int nTicks) = 0;
+	virtual void GetChannelLevels(unsigned int nTicks, float* pLevels, float* pPeaks) = 0;
 	void SetUserInterface(CUserInterface* pUI) { m_pUI = pUI; }
 
 	CSpinLock m_Lock;

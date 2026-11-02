@@ -20,8 +20,6 @@
 // mt32-pi. If not, see <http://www.gnu.org/licenses/>.
 //
 
-#include <circle/timer.h>
-
 #include "control/rotaryencoder.h"
 #include "utility.h"
 
@@ -41,31 +39,6 @@ static constexpr u32 nTransitions = 0b00100100010000101000000100011000;
 // Number of back-to-back transitions we see per detent on various types of rotary encoder
 static constexpr u8 TransitionsPerDetent[] = { 4, 2, 1 };
 
-template <class T, T nMin, T nMax, size_t N>
-class QuadraticLookupTable
-{
-public:
-	constexpr QuadraticLookupTable()
-		: m_Coefficients{0}
-	{
-		constexpr float nScale = (static_cast<float>(nMax) - static_cast<float>(nMin)) / ((N - 1) * (N - 1));
-
-		for (size_t i = 0; i < N; ++i)
-			m_Coefficients[i] = static_cast<T>(nScale * i * i + nMin);
-	}
-
-	constexpr T operator[] (size_t nIndex) const { return m_Coefficients[nIndex]; }
-
-private:
-	T m_Coefficients[N];
-};
-
-// Delta-T threshold below which we begin accelerating
-constexpr u8 AccelThresholdMillis = 32;
-
-// Compile-time quadratic acceleration curve lookup table
-constexpr auto RotaryAccelLookupTable = QuadraticLookupTable<u8, 5, 16, AccelThresholdMillis>();
-
 CRotaryEncoder::CRotaryEncoder(TEncoderType Type, bool bReversed, unsigned GPIOPinCLK, unsigned GPIOPinDAT)
 	: m_CLKPin(GPIOPinCLK, GPIOModeInputPullUp),
 	  m_DATPin(GPIOPinDAT, GPIOModeInputPullUp),
@@ -75,29 +48,14 @@ CRotaryEncoder::CRotaryEncoder(TEncoderType Type, bool bReversed, unsigned GPIOP
 
 	  m_nDelta(0),
 	  m_nState(0),
-	  nPreviousTransitions{ 0 },
-
-	  m_nLastReadTime(0)
+	  nPreviousTransitions{ 0 }
 {
 }
 
 s8 CRotaryEncoder::Read()
 {
-	s8 nResult = m_nDelta;
-
-	// Apply acceleration curve
-	if (nResult != 0)
-	{
-		const unsigned int nTicks = CTimer::GetClockTicks();
-		const unsigned int nDeltaMillis = Utility::TicksToMillis(nTicks - m_nLastReadTime);
-
-		if (nDeltaMillis < AccelThresholdMillis)
-			nResult *= RotaryAccelLookupTable[nDeltaMillis];
-
-		m_nLastReadTime = nTicks;
-
-		m_nDelta = 0;
-	}
+	// The delta is updated from interrupt context; take it atomically so that no step is lost
+	const s8 nResult = __atomic_exchange_n(&m_nDelta, 0, __ATOMIC_ACQ_REL);
 
 	return m_bReversed ? -nResult : nResult;
 }
@@ -128,8 +86,11 @@ void CRotaryEncoder::ReadGPIOPins(bool bCLKValue, bool bDATValue)
 	// Record this transition and check if we have seen enough to get us from one detent to another
 	nTransition |= (1 << m_nState);
 
+	// Full-step encoders rest with both contacts open (11) or, on some models, both closed (00); after all four
+	// transitions of a detent, the encoder is back at its resting state
+	const u8 nPins = m_nState & 3;
 	if ((__builtin_popcount(nTransition) < TransitionsPerDetent[static_cast<u8>(m_Type)])
-	   || ((m_Type == TEncoderType::Full) && ((m_nState & 3) != 3)))
+	   || ((m_Type == TEncoderType::Full) && nPins != 3 && nPins != 0))
 	{
 		// Not enough transitions yet; remember where we are for next time
 		nPreviousTransitions[nRotaryBits-1] = nTransition;

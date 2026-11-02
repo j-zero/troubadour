@@ -1,0 +1,104 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -129,7 +129,7 @@
+ set(CMAKE_C_STANDARD 90)
+ 
+ # the default C++ standard to use for all targets
+-set(CMAKE_CXX_STANDARD 11)
++set(CMAKE_CXX_STANDARD 17)
+ 
+ # whether to use gnu extensions
+ set(CMAKE_C_EXTENSIONS ON)
+diff --git a/src/sfloader/fluid_defsfont.c b/src/sfloader/fluid_defsfont.c
+--- a/src/sfloader/fluid_defsfont.c
++++ b/src/sfloader/fluid_defsfont.c
+@@ -2237,8 +2237,9 @@
+                 sample->preset_count++;
+ 
+                 /* If this is the first time this sample has been selected,
+-                 * load the sampledata */
+-                if(sample->preset_count == 1)
++                 * load the sampledata. It may still be loaded if a voice kept
++                 * it alive after its last preset was deselected. */
++                if(sample->preset_count == 1 && sample->data == NULL)
+                 {
+                     /* Make sure we have an open Soundfont file. Do this here
+                      * to avoid having to open the file if no loading is necessary
+diff --git a/src/utils/fluid_sys.c b/src/utils/fluid_sys.c
+--- a/src/utils/fluid_sys.c
++++ b/src/utils/fluid_sys.c
+@@ -231,29 +231,6 @@
+     return FLUID_FAILED;
+ }
+ 
+-void* fluid_alloc(size_t len)
+-{
+-    void* ptr = malloc(len);
+-
+-#if defined(DEBUG) && !defined(_MSC_VER)
+-    // garbage initialize allocated memory for debug builds to ease reproducing
+-    // bugs like 44453ff23281b3318abbe432fda90888c373022b .
+-    //
+-    // MSVC++ already garbage initializes allocated memory by itself (debug-heap).
+-    //
+-    // 0xCC because
+-    // * it makes pointers reliably crash when dereferencing them,
+-    // * floating points are still some valid but insanely huge negative number, and
+-    // * if for whatever reason this allocated memory is executed, it'll trigger
+-    //   INT3 (...at least on x86)
+-    if(ptr != NULL)
+-    {
+-        memset(ptr, 0xCC, len);
+-    }
+-#endif
+-    return ptr;
+-}
+-
+ /**
+  * Open a file with a UTF-8 string, even in Windows
+  * @param filename The name of the file to open
+@@ -312,24 +289,6 @@
+ }
+ 
+ /**
+- * Wrapper for free() that satisfies at least C90 requirements.
+- *
+- * @param ptr Pointer to memory region that should be freed
+- *
+- * @note Only use this function when the API documentation explicitly says so. Otherwise use
+- * adequate \c delete_fluid_* functions.
+- *
+- * @warning Calling C-std lib <code>free()</code> on memory that is advised to be freed with fluid_free() results in undefined behaviour!
+- * (cf.: "Potential Errors Passing CRT Objects Across DLL Boundaries" found in MS Docs)
+- *
+- * @since 2.0.7
+- */
+-void fluid_free(void* ptr)
+-{
+-    free(ptr);
+-}
+-
+-/**
+  * An improved strtok, still trashes the input string, but is portable and
+  * thread safe.  Also skips token chars at beginning of token string and never
+  * returns an empty token (will return NULL if source ends in token chars though).
+diff --git a/src/utils/fluidsynth_priv.h b/src/utils/fluidsynth_priv.h
+--- a/src/utils/fluidsynth_priv.h
++++ b/src/utils/fluidsynth_priv.h
+@@ -188,13 +188,14 @@
+ 
+ /* Memory allocation */
+ #define FLUID_MALLOC(_n)             fluid_alloc(_n)
+-#define FLUID_REALLOC(_p,_n)         realloc(_p,_n)
++#define FLUID_REALLOC(_p,_n)         fluid_realloc(_p,_n)
+ #define FLUID_FREE(_p)               fluid_free(_p)
+ #define FLUID_NEW(_t)                (_t*)FLUID_MALLOC(sizeof(_t))
+ #define FLUID_ARRAY_ALIGNED(_t,_n,_a) (_t*)FLUID_MALLOC((_n)*sizeof(_t) + ((unsigned int)_a - 1u))
+ #define FLUID_ARRAY(_t,_n)           FLUID_ARRAY_ALIGNED(_t,_n,1u)
+ 
+ void* fluid_alloc(size_t len);
++void* fluid_realloc(void* ptr, size_t len);
+ 
+ /* File access */
+ #define FLUID_FOPEN(_f,_m)           fluid_fopen(_f,_m)

@@ -13,9 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 
@@ -111,7 +110,7 @@ typedef uint64_t fluid_phase_t;
 
 /* Purpose:
  * Creates the expression a.index++. */
-#define fluid_phase_index_plusplus(a)  (((a) += 0x100000000LL)
+#define fluid_phase_index_plusplus(a)  ((a) += 0x100000000LL)
 
 #ifdef __cplusplus
 }

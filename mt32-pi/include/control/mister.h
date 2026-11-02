@@ -28,7 +28,6 @@
 
 #include "event.h"
 #include "misterstatus.h"
-#include "synth/synth.h"
 
 class CMisterControl
 {

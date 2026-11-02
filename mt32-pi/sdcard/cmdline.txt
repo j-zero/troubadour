@@ -1,1 +1,1 @@
-fast=true
+fast=true logdev=ttyS1

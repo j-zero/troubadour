@@ -25,8 +25,6 @@
 
 #include <circle/types.h>
 
-#include "synth/synth.h"
-
 enum class TMisterSynth : u8
 {
 	Mute      = 0xA0,

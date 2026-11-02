@@ -13,9 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 #include "fluid_synth.h"
@@ -143,7 +142,7 @@
  *
  * On input
  * @param chan  fluid_channel_t.
- * @param defaultFromkey, the default 'fromkey portamento' note or 'fromkey legato'
+ * @param default_fromkey the default 'fromkey portamento' note or 'fromkey legato'
  *       note (see description above).
  *
  * @return
@@ -162,7 +161,7 @@
  * - In mono staccato playing,default_fromkey must be INVALID_NOTE.
  * - In mono legato playing,default_fromkey must be valid.
  */
-static char fluid_synth_get_fromkey_portamento_legato(fluid_channel_t *chan,
+static int fluid_synth_get_fromkey_portamento_legato(fluid_channel_t *chan,
         int default_fromkey)
 {
     unsigned char ptc = fluid_channel_get_cc(chan, PORTAMENTO_CTRL);
@@ -410,7 +409,7 @@ int fluid_synth_noteoff_mono_LOCAL(fluid_synth_t *synth, int chan, int key)
                 fluid_channel_breath_msb(channel))
         {
             /* legato playing detection */
-            if(channel->mode  & FLUID_CHANNEL_LEGATO_PLAYING)
+            if (channel->mode & FLUID_CHANNEL_LEGATO_PLAYING && channel->preset != NULL)
             {
                 /* the list contains others notes */
                 if(i_prev >= 0)
@@ -531,8 +530,7 @@ fluid_synth_noteon_mono_staccato(fluid_synth_t *synth, int chan, int key, int ve
  * @param synth instance.
  * @param chan MIDI channel number (0 to MIDI channel count - 1).
  * @param key MIDI note number (0-127).
- * @param Mono, 1 noteoff on monophonic note.
- *              0 noteoff on polyphonic note.
+ * @param Mono 1 for noteoff on monophonic note, 0 for noteoff on polyphonic note.
  * @return FLUID_OK on success, FLUID_FAILED otherwise.
  *
  * Note: On return, on monophonic, possible sustained note is memorized in

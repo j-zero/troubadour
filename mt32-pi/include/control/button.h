@@ -33,6 +33,7 @@ enum TButton : u8
 	Button4,
 
 	EncoderButton,
+	Encoder2Button,
 
 	Max,
 };

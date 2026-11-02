@@ -27,9 +27,9 @@
 #include <circle/sound/pwmsoundbasedevice.h>
 
 #include <cstdarg>
+#include <cstring>
 
-#include "lcd/drivers/hd44780.h"
-#include "lcd/drivers/ssd1306.h"
+#include "lcd/drivers/gc9a01.h"
 #include "lcd/ui.h"
 #include "mt32pi.h"
 
@@ -39,6 +39,7 @@ const char MT32PiFullName[] = MT32_PI_NAME " " MT32_PI_VERSION;
 
 const char WLANFirmwarePath[] = "SD:firmware/";
 const char WLANConfigFile[]   = "SD:wpa_supplicant.conf";
+const char LastStateFile[]    = "SD:last_state.cfg";
 
 constexpr u32 LCDUpdatePeriodMillis                = 16;
 constexpr u32 MisterUpdatePeriodMillis             = 50;
@@ -50,10 +51,7 @@ constexpr float Sample24BitMax = (1 << 24 - 1) - 1;
 enum class TCustomSysExCommand : u8
 {
 	Reboot                = 0x00,
-	SwitchMT32ROMSet      = 0x01,
 	SwitchSoundFont       = 0x02,
-	SwitchSynth           = 0x03,
-	SetMT32ReversedStereo = 0x04,
 };
 
 CMT32Pi* CMT32Pi::s_pThis = nullptr;
@@ -85,7 +83,7 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_pUDPMIDIReceiver(nullptr),
 	  m_pFTPDaemon(nullptr),
 
-	  m_pLCD(nullptr),
+	  m_pDisplay(nullptr),
 	  m_nLCDUpdateTime(0),
 #ifdef MONITOR_TEMPERATURE
 	  m_nTempUpdateTime(0),
@@ -98,6 +96,20 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_bDeferredSoundFontSwitchFlag(false),
 	  m_nDeferredSoundFontSwitchIndex(0),
 	  m_nDeferredSoundFontSwitchTime(0),
+
+	  m_bDeferredProgramChangeFlag(false),
+	  m_nDeferredProgramChangeIndex(0),
+	  m_nDeferredProgramChangeTime(0),
+
+	  m_Menu(TMenu::None),
+	  m_nParameterPage(ParameterPageVolume),
+	  m_nMenuIndex(0),
+	  m_nMenuCurrentIndex(0),
+	  m_nMenuTime(0),
+	  m_nLastParameterTurnTime(0),
+
+	  m_bLastStateChanged(false),
+	  m_nLastStateChangeTime(0),
 
 	  m_bSerialMIDIAvailable(false),
 	  m_bSerialMIDIEnabled(false),
@@ -117,9 +129,9 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_pPisound(nullptr),
 
 	  m_nMasterVolume(100),
-	  m_pCurrentSynth(nullptr),
-	  m_pMT32Synth(nullptr),
-	  m_pSoundFontSynth(nullptr)
+	  m_pSoundFontSynth(nullptr),
+
+	  m_bStartupDone(false)
 {
 	s_pThis = this;
 }
@@ -133,48 +145,28 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 	m_bSerialMIDIAvailable = bSerialMIDIAvailable;
 	m_bSerialMIDIEnabled = bSerialMIDIAvailable;
 
-	switch (m_pConfig->LCDType)
+	if (m_pConfig->LCDType == CConfig::TLCDType::GC9A01SPI)
 	{
-		case CConfig::TLCDType::HD44780FourBit:
-			m_pLCD = new CHD44780FourBit(m_pConfig->LCDWidth, m_pConfig->LCDHeight);
-			break;
+		const CGC9A01::TPins Pins =
+		{
+			static_cast<u8>(m_pConfig->LCDSPIDCPin & 31),
+			static_cast<u8>(m_pConfig->LCDSPIResetPin & 31),
+			static_cast<u8>(m_pConfig->LCDSPIBacklightPin & 31),
+		};
+		m_pDisplay = new CGC9A01(m_pSPIMaster, Pins, m_pConfig->LCDSPIClockSpeed, m_pConfig->LCDRotation, m_pConfig->LCDMirror);
 
-		case CConfig::TLCDType::HD44780I2C:
-			m_pLCD = new CHD44780I2C(m_pI2CMaster, m_pConfig->LCDI2CLCDAddress, m_pConfig->LCDWidth, m_pConfig->LCDHeight);
-			break;
-
-		case CConfig::TLCDType::SH1106I2C:
-			m_pLCD = new CSH1106(m_pI2CMaster, m_pConfig->LCDI2CLCDAddress, m_pConfig->LCDWidth, m_pConfig->LCDHeight, m_pConfig->LCDRotation);
-			break;
-
-		case CConfig::TLCDType::SSD1306I2C:
-			m_pLCD = new CSSD1306(m_pI2CMaster, m_pConfig->LCDI2CLCDAddress, m_pConfig->LCDWidth, m_pConfig->LCDHeight, m_pConfig->LCDRotation, m_pConfig->LCDMirror);
-			break;
-
-		default:
-			break;
-	}
-
-	if (m_pLCD)
-	{
-		if (m_pLCD->Initialize())
+		if (m_pDisplay->Initialize())
 		{
 			CLogger::Get()->RegisterPanicHandler(PanicHandler);
 
 			// Splash screen
-			if (m_pLCD->GetType() == CLCD::TType::Graphical && !m_pConfig->SystemVerbose)
-				m_pLCD->DrawImage(TImage::MT32PiLogo, true);
-			else
-			{
-				const u8 nOffsetX = CUserInterface::CenterMessageOffset(*m_pLCD, MT32PiFullName);
-				m_pLCD->Print(MT32PiFullName, nOffsetX, 0, false, true);
-			}
+			m_UserInterface.ShowStartup(*m_pDisplay, MT32PiFullName, nullptr);
 		}
 		else
 		{
-			LOGWARN("LCD init failed; invalid dimensions?");
-			delete m_pLCD;
-			m_pLCD = nullptr;
+			LOGWARN("Display init failed");
+			delete m_pDisplay;
+			m_pDisplay = nullptr;
 		}
 	}
 
@@ -195,8 +187,17 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 	LCDLog(TLCDLogType::Startup, "Init Network");
 	InitNetwork();
 
-	// Check for Blokas Pisound, but only when not using 4-bit HD44780 (GPIO pin conflict)
-	if (m_pConfig->LCDType != CConfig::TLCDType::HD44780FourBit)
+	// The Pisound check drives some GPIO pins, which the second encoder of the simple_encoder scheme may use
+	bool bEncoder2OnPisoundPins = false;
+	if (m_pConfig->ControlScheme == CConfig::TControlScheme::SimpleEncoder)
+	{
+		const int Pins[] = { m_pConfig->ControlEncoder2CLKPin, m_pConfig->ControlEncoder2DATPin, m_pConfig->ControlEncoder2ButtonPin };
+		for (int nPin : Pins)
+			bEncoder2OnPisoundPins |= nPin == 12 || nPin == 13 || nPin == 16 || nPin == 24 || nPin == 25 || nPin == 26;
+	}
+
+	// Check for Blokas Pisound, but only when not using the SPI display or the Pisound's pins otherwise (GPIO pin conflict)
+	if (m_pConfig->LCDType != CConfig::TLCDType::GC9A01SPI && !bEncoder2OnPisoundPins)
 	{
 		m_pPisound = new CPisound(m_pSPIMaster, m_pGPIOManager, m_pConfig->AudioSampleRate);
 		if (m_pPisound->Initialize())
@@ -260,7 +261,15 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 	if (m_pConfig->ControlScheme == CConfig::TControlScheme::SimpleButtons)
 		m_pControl = new CControlSimpleButtons(m_EventQueue);
 	else if (m_pConfig->ControlScheme == CConfig::TControlScheme::SimpleEncoder)
-		m_pControl = new CControlSimpleEncoder(m_EventQueue, m_pConfig->ControlEncoderType, m_pConfig->ControlEncoderReversed);
+	{
+		const CControlSimpleEncoder::TEncoderPins Encoder2Pins =
+		{
+			static_cast<u8>(m_pConfig->ControlEncoder2CLKPin & 31),
+			static_cast<u8>(m_pConfig->ControlEncoder2DATPin & 31),
+			static_cast<u8>(m_pConfig->ControlEncoder2ButtonPin & 31),
+		};
+		m_pControl = new CControlSimpleEncoder(m_EventQueue, m_pConfig->ControlEncoderType, m_pConfig->ControlEncoderReversed, Encoder2Pins, m_pConfig->ControlEncoder2Reversed);
+	}
 
 	if (m_pControl && !m_pControl->Initialize())
 	{
@@ -269,33 +278,18 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 		m_pControl = nullptr;
 	}
 
-	LCDLog(TLCDLogType::Startup, "Init mt32emu");
-	InitMT32Synth();
+	if (m_LastState.Load(LastStateFile))
+		LOGNOTE("Restoring settings from '%s'", LastStateFile);
 
-	LCDLog(TLCDLogType::Startup, "Init FluidSynth");
-	InitSoundFontSynth();
-
-	// Set initial synthesizer
-	if (m_pConfig->SystemDefaultSynth == CConfig::TSystemDefaultSynth::MT32)
-		m_pCurrentSynth = m_pMT32Synth;
-	else if (m_pConfig->SystemDefaultSynth == CConfig::TSystemDefaultSynth::SoundFont)
-		m_pCurrentSynth = m_pSoundFontSynth;
-
-	if (!m_pCurrentSynth)
+	LCDLog(TLCDLogType::Startup, "Loading SoundFont");
+	CSoundFontSynth::SetLoadProgressHandler(LoadProgressHandler, this);
+	if (!InitSoundFontSynth())
 	{
-		LOGERR("Preferred synth failed to initialize successfully");
-
-		// Activate any working synth
-		if (m_pMT32Synth)
-			m_pCurrentSynth = m_pMT32Synth;
-		else if (m_pSoundFontSynth)
-			m_pCurrentSynth = m_pSoundFontSynth;
-		else
-		{
-			LOGPANIC("No synths available; ROMs/SoundFonts not found");
-			return false;
-		}
+		LOGPANIC("No SoundFonts found");
+		return false;
 	}
+
+	RestoreLastState();
 
 	if (m_pPisound)
 		LOGNOTE("Using Pisound MIDI interface");
@@ -305,14 +299,11 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 	CCPUThrottle::Get()->DumpStatus();
 	SetPowerSaveTimeout(m_pConfig->SystemPowerSaveTimeout);
 
-	// Clear LCD
-	if (m_pLCD)
-		m_pLCD->Clear();
-
 	// Start audio
 	m_pSound->Start();
 
-	// Start other cores
+	// Start other cores; the UI task draws the LCD from now on
+	m_bStartupDone = true;
 	if (!CMultiCoreSupport::Initialize())
 		return false;
 
@@ -367,36 +358,13 @@ bool CMT32Pi::InitNetwork()
 	return m_pNet != nullptr;
 }
 
-bool CMT32Pi::InitMT32Synth()
-{
-	assert(m_pMT32Synth == nullptr);
-
-	m_pMT32Synth = new CMT32Synth(m_pConfig->AudioSampleRate, m_pConfig->MT32EmuGain, m_pConfig->MT32EmuReverbGain, m_pConfig->MT32EmuResamplerQuality);
-	if (!m_pMT32Synth->Initialize())
-	{
-		LOGWARN("mt32emu init failed; no ROMs present?");
-		delete m_pMT32Synth;
-		m_pMT32Synth = nullptr;
-		return false;
-	}
-
-	// Set initial MT-32 channel assignment from config
-	if (m_pConfig->MT32EmuMIDIChannels == CMT32Synth::TMIDIChannels::Alternate)
-		m_pMT32Synth->SetMIDIChannels(m_pConfig->MT32EmuMIDIChannels);
-
-	// Set MT-32 reversed stereo option from config
-	m_pMT32Synth->SetReversedStereo(m_pConfig->MT32EmuReversedStereo);
-
-	m_pMT32Synth->SetUserInterface(&m_UserInterface);
-
-	return true;
-}
-
 bool CMT32Pi::InitSoundFontSynth()
 {
 	assert(m_pSoundFontSynth == nullptr);
 
 	m_pSoundFontSynth = new CSoundFontSynth(m_pConfig->AudioSampleRate);
+	m_pSoundFontSynth->SetInitialSoundFont(m_LastState.SoundFontPath);
+	m_pSoundFontSynth->SetEffectOverrides(m_LastState.Effects);
 	if (!m_pSoundFontSynth->Initialize())
 	{
 		LOGWARN("FluidSynth init failed; no SoundFonts present?");
@@ -408,6 +376,22 @@ bool CMT32Pi::InitSoundFontSynth()
 	m_pSoundFontSynth->SetUserInterface(&m_UserInterface);
 
 	return true;
+}
+
+void CMT32Pi::RestoreLastState()
+{
+	if (m_LastState.nVolume >= 0)
+	{
+		m_nMasterVolume = Utility::Clamp(m_LastState.nVolume, 0, 100);
+		m_pSoundFontSynth->SetMasterVolume(m_nMasterVolume);
+		m_UserInterface.SetVolume(m_nMasterVolume);
+	}
+
+	if (m_LastState.nProgram >= 0)
+	{
+		LCDLog(TLCDLogType::Startup, "Loading instrument");
+		ApplyLastInstrument();
+	}
 }
 
 void CMT32Pi::MainTask()
@@ -445,13 +429,13 @@ void CMT32Pi::MainTask()
 		// Check for active sensing timeout
 		if (m_bActiveSenseFlag && (nTicks > m_nActiveSenseTime) && (nTicks - m_nActiveSenseTime) >= MSEC2HZ(ActiveSenseTimeoutMillis))
 		{
-			m_pCurrentSynth->AllSoundOff();
+			m_pSoundFontSynth->AllSoundOff();
 			m_bActiveSenseFlag = false;
 			LOGNOTE("Active sense timeout - turning notes off");
 		}
 
 		// Update power management
-		if (m_pCurrentSynth->IsActive())
+		if (m_pSoundFontSynth->IsActive())
 			Awaken();
 
 #ifdef MONITOR_TEMPERATURE
@@ -469,10 +453,7 @@ void CMT32Pi::MainTask()
 		// Check for deferred SoundFont switch
 		if (m_bDeferredSoundFontSwitchFlag)
 		{
-			// Delay switch if scrolling a long SoundFont name
-			if (m_UserInterface.IsScrolling())
-				m_nDeferredSoundFontSwitchTime = nTicks;
-			else if ((nTicks - m_nDeferredSoundFontSwitchTime) >= static_cast<unsigned int>(m_pConfig->ControlSwitchTimeout) * HZ)
+			if ((nTicks - m_nDeferredSoundFontSwitchTime) >= static_cast<unsigned int>(m_pConfig->ControlSwitchTimeout) * HZ)
 			{
 				SwitchSoundFont(m_nDeferredSoundFontSwitchIndex);
 				m_bDeferredSoundFontSwitchFlag = false;
@@ -482,12 +463,31 @@ void CMT32Pi::MainTask()
 			}
 		}
 
+		// Check for deferred instrument change
+		if (m_bDeferredProgramChangeFlag && (nTicks - m_nDeferredProgramChangeTime) >= MSEC2HZ(ProgramChangeDelayMillis))
+			ApplyProgramChange(m_nDeferredProgramChangeIndex);
+
+		// Close menus that aren't used anymore
+		if (m_Menu != TMenu::None && (nTicks - m_nMenuTime) >= MSEC2HZ(MenuTimeoutMillis))
+			CloseMenu();
+
+		// Save settings once they have settled
+		if (m_bLastStateChanged && (nTicks - m_nLastStateChangeTime) >= MSEC2HZ(LastStateSaveDelayMillis))
+		{
+			m_bLastStateChanged = false;
+			m_LastState.Save(LastStateFile);
+		}
+
 		// Check for USB PnP events
 		UpdateUSB();
 
 		// Allow other tasks to run
 		pScheduler->Yield();
 	}
+
+	// Don't lose a pending change on reboot
+	if (m_bLastStateChanged)
+		m_LastState.Save(LastStateFile);
 
 
 	// Stop audio
@@ -505,50 +505,39 @@ void CMT32Pi::UITask()
 	const bool bMisterEnabled = m_pConfig->ControlMister;
 
 	// Nothing for this core to do; bail out
-	if (!(m_pLCD || bMisterEnabled))
+	if (!(m_pDisplay || bMisterEnabled))
 	{
 		m_bUITaskDone = true;
 		return;
 	}
 
-	// Display current MT-32 ROM version/SoundFont
-	m_pCurrentSynth->ReportStatus();
+	// Display current SoundFont
+	m_pSoundFontSynth->ReportStatus();
 
 	while (m_bRunning)
 	{
 		const unsigned int nTicks = CTimer::GetClockTicks();
 
-		// Update LCD
-		if (m_pLCD && (nTicks - m_nLCDUpdateTime) >= Utility::MillisToTicks(LCDUpdatePeriodMillis))
+		// Update display
+		if (m_pDisplay && (nTicks - m_nLCDUpdateTime) >= Utility::MillisToTicks(LCDUpdatePeriodMillis))
 		{
-			m_UserInterface.Update(*m_pLCD, *m_pCurrentSynth, nTicks);
+			m_UserInterface.Update(*m_pDisplay, *m_pSoundFontSynth, nTicks);
 			m_nLCDUpdateTime = nTicks;
 		}
 
 		// Poll MiSTer interface
 		if (bMisterEnabled && (nTicks - m_nMisterUpdateTime) >= Utility::MillisToTicks(MisterUpdatePeriodMillis))
 		{
-			TMisterStatus Status{TMisterSynth::Unknown, 0xFF, 0xFF};
-
-			if (m_pCurrentSynth == m_pMT32Synth)
-				Status.Synth = TMisterSynth::MT32;
-			else if (m_pCurrentSynth == m_pSoundFontSynth)
-				Status.Synth = TMisterSynth::SoundFont;
-
-			if (m_pMT32Synth)
-				Status.MT32ROMSet = static_cast<u8>(m_pMT32Synth->GetROMSet());
-
-			if (m_pSoundFontSynth)
-				Status.SoundFontIndex = m_pSoundFontSynth->GetSoundFontIndex();
+			TMisterStatus Status{TMisterSynth::SoundFont, 0xFF, static_cast<u8>(m_pSoundFontSynth->GetSoundFontIndex())};
 
 			m_MisterControl.Update(Status);
 			m_nMisterUpdateTime = nTicks;
 		}
 	}
 
-	// Clear screen
-	if (m_pLCD)
-		m_pLCD->Clear();
+	// Turn the display off
+	if (m_pDisplay)
+		m_pDisplay->SetBacklightState(false);
 
 	m_bUITaskDone = true;
 }
@@ -576,7 +565,7 @@ void CMT32Pi::AudioTask()
 		const size_t nFrames = nQueueSizeFrames - m_pSound->GetQueueFramesAvail();
 		const size_t nWriteBytes = nFrames * nBytesPerFrame;
 
-		m_pCurrentSynth->Render(FloatBuffer, nFrames);
+		m_pSoundFontSynth->Render(FloatBuffer, nFrames);
 
 		if (bReversedStereo)
 		{
@@ -663,7 +652,7 @@ void CMT32Pi::OnShortMessage(u32 nMessage)
 	if ((nMessage & 0xFF) < 0xF0)
 		LEDOn();
 
-	m_pCurrentSynth->HandleMIDIShortMessage(nMessage);
+	m_pSoundFontSynth->HandleMIDIShortMessage(nMessage);
 
 	// Wake from power saving mode if necessary
 	Awaken();
@@ -676,7 +665,7 @@ void CMT32Pi::OnSysExMessage(const u8* pData, size_t nSize)
 
 	// If we don't consume the SysEx message, forward it to the synthesizer
 	if (!ParseCustomSysEx(pData, nSize))
-		m_pCurrentSynth->HandleMIDISysExMessage(pData, nSize);
+		m_pSoundFontSynth->HandleMIDISysExMessage(pData, nSize);
 
 	// Wake from power saving mode if necessary
 	Awaken();
@@ -697,17 +686,11 @@ void CMT32Pi::OnSysExOverflow()
 
 void CMT32Pi::OnAppleMIDIConnect(const CIPAddress* pIPAddress, const char* pName)
 {
-	if (!m_pLCD)
-		return;
-
 	LCDLog(TLCDLogType::Notice, "%s connected!", pName);
 }
 
 void CMT32Pi::OnAppleMIDIDisconnect(const CIPAddress* pIPAddress, const char* pName)
 {
-	if (!m_pLCD)
-		return;
-
 	LCDLog(TLCDLogType::Notice, "%s disconnected!", pName);
 }
 
@@ -733,41 +716,14 @@ bool CMT32Pi::ParseCustomSysEx(const u8* pData, size_t nSize)
 	if (nSize != 5)
 		return false;
 
-	const u8 nParameter = pData[3];
-	switch (Command)
+	// Switch SoundFont (F0 7D 02 xx F7)
+	if (Command == TCustomSysExCommand::SwitchSoundFont)
 	{
-		// Switch MT-32 ROM set (F0 7D 01 xx F7)
-		case TCustomSysExCommand::SwitchMT32ROMSet:
-		{
-			const TMT32ROMSet NewROMSet = static_cast<TMT32ROMSet>(nParameter);
-			if (NewROMSet < TMT32ROMSet::Any)
-				SwitchMT32ROMSet(NewROMSet);
-			return true;
-		}
-
-		// Switch SoundFont (F0 7D 02 xx F7)
-		case TCustomSysExCommand::SwitchSoundFont:
-			SwitchSoundFont(nParameter);
-			return true;
-
-		// Switch synthesizer (F0 7D 03 xx F7)
-		case TCustomSysExCommand::SwitchSynth:
-		{
-			SwitchSynth(static_cast<TSynth>(nParameter));
-			return true;
-		}
-
-		// Swap MT-32 stereo channels (F0 7D 04 xx F7)
-		case TCustomSysExCommand::SetMT32ReversedStereo:
-		{
-			if (m_pMT32Synth)
-				m_pMT32Synth->SetReversedStereo(nParameter);
-			return true;
-		}
-
-		default:
-			return false;
+		SwitchSoundFont(pData[3]);
+		return true;
 	}
+
+	return false;
 }
 
 void CMT32Pi::UpdateUSB(bool bStartup)
@@ -790,20 +746,9 @@ void CMT32Pi::UpdateUSB(bool bStartup)
 		{
 			if (!bStartup)
 			{
-				LCDLog(TLCDLogType::Spinner, "MT-32 ROM rescan");
-				if (m_pMT32Synth)
-					m_pMT32Synth->GetROMManager().ScanROMs();
-				else
-					InitMT32Synth();
-
 				LCDLog(TLCDLogType::Spinner, "SoundFont rescan");
-				if (m_pSoundFontSynth)
-					m_pSoundFontSynth->GetSoundFontManager().ScanSoundFonts();
-				else
-					InitSoundFontSynth();
-
-				if (m_pSoundFontSynth)
-					LCDLog(TLCDLogType::Notice, "%d SoundFonts avail", m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount());
+				m_pSoundFontSynth->GetSoundFontManager().ScanSoundFonts();
+				LCDLog(TLCDLogType::Notice, "%d SoundFonts avail", m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount());
 			}
 		}
 	}
@@ -814,13 +759,9 @@ void CMT32Pi::UpdateUSB(bool bStartup)
 
 		f_unmount("USB:");
 
-		// Only need to rescan SoundFonts on storage removal; MT-32 ROMs are kept in memory
-		if (m_pSoundFontSynth)
-		{
-			LCDLog(TLCDLogType::Spinner, "SoundFont rescan");
-			m_pSoundFontSynth->GetSoundFontManager().ScanSoundFonts();
-			LCDLog(TLCDLogType::Notice, "%d SoundFonts avail", m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount());
-		}
+		LCDLog(TLCDLogType::Spinner, "SoundFont rescan");
+		m_pSoundFontSynth->GetSoundFontManager().ScanSoundFonts();
+		LCDLog(TLCDLogType::Notice, "%d SoundFonts avail", m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount());
 	}
 	m_pUSBMassStorageDevice = pUSBMassStorageDevice;
 
@@ -1026,23 +967,12 @@ void CMT32Pi::ProcessEventQueue()
 				ProcessButtonEvent(Event.Button);
 				break;
 
-			case TEventType::SwitchSynth:
-				SwitchSynth(Event.SwitchSynth.Synth);
-				break;
-
-			case TEventType::SwitchMT32ROMSet:
-				SwitchMT32ROMSet(Event.SwitchMT32ROMSet.ROMSet);
-				break;
-
 			case TEventType::SwitchSoundFont:
 				DeferSwitchSoundFont(Event.SwitchSoundFont.Index);
 				break;
 
 			case TEventType::AllSoundOff:
-				if (m_pMT32Synth)
-					m_pMT32Synth->AllSoundOff();
-				if (m_pSoundFontSynth)
-					m_pSoundFontSynth->AllSoundOff();
+				m_pSoundFontSynth->AllSoundOff();
 				break;
 
 			case TEventType::DisplayImage:
@@ -1050,7 +980,7 @@ void CMT32Pi::ProcessEventQueue()
 				break;
 
 			case TEventType::Encoder:
-				SetMasterVolume(m_nMasterVolume + Event.Encoder.nDelta);
+				ProcessEncoderEvent(Event.Encoder);
 				break;
 		}
 	}
@@ -1058,133 +988,300 @@ void CMT32Pi::ProcessEventQueue()
 
 void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 {
-	if (Event.Button == TButton::EncoderButton)
-	{
-		LCDLog(TLCDLogType::Notice, "Enc. button %s", Event.bPressed ? "PRESSED" : "RELEASED");
-		return;
-	}
-
 	if (!Event.bPressed)
 		return;
 
-	if (Event.Button == TButton::Button1 && !Event.bRepeat)
+	switch (Event.Button)
 	{
-		// Swap synths
-		if (m_pCurrentSynth == m_pMT32Synth)
-			SwitchSynth(TSynth::SoundFont);
-		else
-			SwitchSynth(TSynth::MT32);
-	}
-	else if (Event.Button == TButton::Button2 && !Event.bRepeat)
-	{
-		if (m_pCurrentSynth == m_pMT32Synth)
-			NextMT32ROMSet();
-		else
-		{
-			// Next SoundFont
-			const size_t nSoundFonts = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
+		// Previous/next instrument for the first MIDI channels
+		case TButton::Button1:
+			DeferProgramChange(-1);
+			break;
 
-			if (!nSoundFonts)
-				LCDLog(TLCDLogType::Error, "No SoundFonts!");
+		case TButton::Button2:
+			DeferProgramChange(1);
+			break;
+
+		case TButton::Button3:
+		case TButton::Button4:
+			SetMasterVolume(m_nMasterVolume + (Event.Button == TButton::Button3 ? -1 : 1));
+			LCDLog(TLCDLogType::Notice, "Volume: %d", m_nMasterVolume);
+			break;
+
+		// Select the highlighted instrument, or open the list
+		case TButton::EncoderButton:
+			if (Event.bRepeat)
+				break;
+
+			if (m_Menu == TMenu::Instruments)
+			{
+				CloseMenu();
+				m_bDeferredProgramChangeFlag = false;
+				ApplyProgramChange(m_nMenuIndex);
+			}
+			else
+				OpenMenu(TMenu::Instruments);
+			break;
+
+		// Next parameter; in the SoundFont list, load the highlighted SoundFont if it isn't the current one
+		case TButton::Encoder2Button:
+			if (Event.bRepeat)
+				break;
+
+			if (m_Menu == TMenu::SoundFonts && m_nMenuIndex != m_pSoundFontSynth->GetSoundFontIndex())
+			{
+				CloseMenu();
+				m_bDeferredSoundFontSwitchFlag = false;
+				SwitchSoundFont(m_nMenuIndex);
+			}
+			else if (m_Menu == TMenu::SoundFonts)
+			{
+				m_nParameterPage = ParameterPageVolume;
+				OpenMenu(TMenu::Parameter);
+			}
+			else if (m_Menu == TMenu::Parameter)
+			{
+				if (++m_nParameterPage < ParameterPageCount)
+					OpenMenu(TMenu::Parameter);
+				else
+					OpenMenu(TMenu::SoundFonts);
+			}
 			else
 			{
-				size_t nNextSoundFont;
-				if (m_bDeferredSoundFontSwitchFlag)
-					nNextSoundFont = (m_nDeferredSoundFontSwitchIndex + 1) % nSoundFonts;
-				else
-				{
-					// Current SoundFont was probably on a USB stick that has since been removed
-					const size_t nCurrentSoundFont = m_pSoundFontSynth->GetSoundFontIndex();
-					if (nCurrentSoundFont > nSoundFonts)
-						nNextSoundFont = 0;
-					else
-						nNextSoundFont = (nCurrentSoundFont + 1) % nSoundFonts;
-				}
-
-				DeferSwitchSoundFont(nNextSoundFont);
+				m_nParameterPage = ParameterPageVolume;
+				OpenMenu(TMenu::Parameter);
 			}
+			break;
+
+		default:
+			break;
+	}
+}
+
+void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
+{
+	if (Event.nEncoder == 0)
+	{
+		// Turning the first encoder browses the instruments
+		if (m_Menu != TMenu::Instruments)
+			OpenMenu(TMenu::Instruments);
+
+		const size_t nPresets = m_pSoundFontSynth->GetPresetCount();
+		if (nPresets)
+			m_nMenuIndex = (m_nMenuIndex + nPresets + Event.nDelta % static_cast<int>(nPresets)) % nPresets;
+	}
+	else if (m_Menu == TMenu::SoundFonts)
+	{
+		const size_t nSoundFonts = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
+		if (nSoundFonts)
+			m_nMenuIndex = (m_nMenuIndex + nSoundFonts + Event.nDelta % static_cast<int>(nSoundFonts)) % nSoundFonts;
+	}
+	else
+	{
+		// Turning the second encoder changes the volume unless another parameter was selected
+		if (m_Menu != TMenu::Parameter)
+		{
+			m_nParameterPage = ParameterPageVolume;
+			OpenMenu(TMenu::Parameter);
 		}
+
+		// Values have many steps, so turning quickly makes bigger steps; lists always move by one per detent
+		const unsigned int nTicks = CTimer::GetClockTicks();
+		const unsigned int nInterval = nTicks - m_nLastParameterTurnTime;
+		const int nFactor = nInterval < ParameterFastTurnMicros ? 4 : nInterval < ParameterMediumTurnMicros ? 2 : 1;
+		m_nLastParameterTurnTime = nTicks;
+
+		ChangeParameter(Event.nDelta * nFactor);
 	}
-	else if (Event.Button == TButton::Button3)
-	{
-		SetMasterVolume(m_nMasterVolume - 1);
-	}
-	else if (Event.Button == TButton::Button4)
-	{
-		SetMasterVolume(m_nMasterVolume + 1);
-	}
+
+	m_nMenuTime = m_pTimer->GetTicks();
+	UpdateMenu();
 }
 
-void CMT32Pi::SwitchSynth(TSynth NewSynth)
+void CMT32Pi::OpenMenu(TMenu Menu)
 {
-	CSynthBase* pNewSynth = nullptr;
+	m_Menu = Menu;
+	m_nMenuTime = m_pTimer->GetTicks();
 
-	if (NewSynth == TSynth::MT32)
-		pNewSynth = m_pMT32Synth;
-	else if (NewSynth == TSynth::SoundFont)
-		pNewSynth = m_pSoundFontSynth;
-
-	if (pNewSynth == nullptr)
+	if (Menu == TMenu::Instruments)
 	{
-		LCDLog(TLCDLogType::Warning, "Synth unavailable!");
+		m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(0);
+		m_nMenuIndex = m_bDeferredProgramChangeFlag ? m_nDeferredProgramChangeIndex : m_nMenuCurrentIndex;
+	}
+	else if (Menu == TMenu::SoundFonts)
+		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetSoundFontIndex();
+
+	UpdateMenu();
+}
+
+void CMT32Pi::CloseMenu()
+{
+	m_Menu = TMenu::None;
+	m_nParameterPage = ParameterPageVolume;
+	m_UserInterface.HideMenu();
+}
+
+void CMT32Pi::UpdateMenu()
+{
+	if (!m_pDisplay || m_Menu == TMenu::None)
+		return;
+
+	CUserInterface::TMenu Menu = {};
+	Menu.nCurrentRow = -1;
+
+	if (m_Menu == TMenu::Parameter)
+	{
+		// Name and value with a gauge
+		Menu.Type = CUserInterface::TMenu::TType::Parameter;
+		Menu.nPage = m_nParameterPage + 1;
+		Menu.nPages = ParameterPageCount + 1;
+
+		if (m_nParameterPage == ParameterPageVolume)
+		{
+			snprintf(Menu.Title, sizeof(Menu.Title), "Volume");
+			snprintf(Menu.Value, sizeof(Menu.Value), "%d", m_nMasterVolume);
+			Menu.nFraction = m_nMasterVolume / 100.0f;
+		}
+		else
+		{
+			const auto Effect = static_cast<CSoundFontSynth::TEffect>(m_nParameterPage - 1);
+			const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
+			const float nValue = m_pSoundFontSynth->GetEffect(Effect);
+
+			snprintf(Menu.Title, sizeof(Menu.Title), "%s", Info.pName);
+			snprintf(Menu.Value, sizeof(Menu.Value), "%.*f", Info.nDecimals, nValue);
+			Menu.nFraction = (nValue - Info.nMin) / (Info.nMax - Info.nMin);
+		}
+
+		m_UserInterface.ShowMenu(Menu);
 		return;
 	}
 
-	if (pNewSynth == m_pCurrentSynth)
+	// List with the selection in the middle row
+	const bool bInstruments = m_Menu == TMenu::Instruments;
+	const size_t nCount = bInstruments ? m_pSoundFontSynth->GetPresetCount() : m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
+	constexpr int nSelectedRow = CUserInterface::TMenu::SelectedRow;
+
+	Menu.Type = CUserInterface::TMenu::TType::List;
+	snprintf(Menu.Title, sizeof(Menu.Title), "%s %d/%d", bInstruments ? "Instrument" : "SoundFont", static_cast<int>(m_nMenuIndex + 1), static_cast<int>(nCount));
+
+	for (int nRow = 0; nRow < static_cast<int>(CUserInterface::TMenu::ListRows); ++nRow)
 	{
-		LCDLog(TLCDLogType::Warning, "Already active!");
+		const int nIndex = static_cast<int>(m_nMenuIndex) + nRow - nSelectedRow;
+		if (nIndex < 0 || nIndex >= static_cast<int>(nCount))
+			continue;
+
+		char* pRow = Menu.Rows[nRow];
+		if (bInstruments)
+			m_pSoundFontSynth->FormatPresetName(nIndex, pRow, sizeof(Menu.Rows[nRow]));
+		else
+		{
+			const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(nIndex);
+			snprintf(pRow, sizeof(Menu.Rows[nRow]), "%s", pName ? pName : "?");
+		}
+
+		if (static_cast<size_t>(nIndex) == m_nMenuCurrentIndex)
+			Menu.nCurrentRow = nRow;
+	}
+
+	m_UserInterface.ShowMenu(Menu);
+}
+
+void CMT32Pi::ChangeParameter(int nDelta)
+{
+	if (m_nParameterPage == ParameterPageVolume)
+	{
+		SetMasterVolume(m_nMasterVolume + nDelta);
 		return;
 	}
 
-	m_pCurrentSynth->AllSoundOff();
-	m_pCurrentSynth = pNewSynth;
-	const char* pMode = NewSynth == TSynth::MT32 ? "MT-32 mode" : "SoundFont mode";
-	LOGNOTE("Switching to %s", pMode);
-	LCDLog(TLCDLogType::Notice, pMode);
-}
+	const auto Effect = static_cast<CSoundFontSynth::TEffect>(m_nParameterPage - 1);
+	const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
 
-void CMT32Pi::SwitchMT32ROMSet(TMT32ROMSet ROMSet)
-{
-	if (m_pMT32Synth == nullptr)
-		return;
+	// Move in whole steps from the current value, so that values stay on the step grid
+	const float nValue = m_pSoundFontSynth->GetEffect(Effect);
+	const int nStep = static_cast<int>((nValue - Info.nMin) / Info.nStep + 0.5f) + nDelta;
+	m_pSoundFontSynth->SetEffect(Effect, Info.nMin + nStep * Info.nStep);
 
-	LOGNOTE("Switching to ROM set %d", static_cast<u8>(ROMSet));
-	if (m_pMT32Synth->SwitchROMSet(ROMSet) && m_pCurrentSynth == m_pMT32Synth)
-		m_pMT32Synth->ReportStatus();
-}
-
-void CMT32Pi::NextMT32ROMSet()
-{
-	if (m_pMT32Synth == nullptr)
-		return;
-
-	LOGNOTE("Switching to next ROM set");
-
-	if (m_pMT32Synth->NextROMSet() && m_pCurrentSynth == m_pMT32Synth)
-		m_pMT32Synth->ReportStatus();
+	m_LastState.Effects = m_pSoundFontSynth->GetEffectOverrides();
+	DeferSaveLastState();
 }
 
 void CMT32Pi::SwitchSoundFont(size_t nIndex)
 {
-	if (m_pSoundFontSynth == nullptr)
-		return;
-
 	LOGNOTE("Switching to SoundFont %d", nIndex);
+
+	// The pending instrument refers to the old SoundFont
+	m_bDeferredProgramChangeFlag = false;
 	if (m_pSoundFontSynth->SwitchSoundFont(nIndex))
 	{
+		m_LastState.SoundFontPath = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontPath(nIndex);
+		DeferSaveLastState();
+
+		// Keep the instrument if the new SoundFont has it
+		ApplyLastInstrument();
+
 		// Handle any MIDI data that has been queued up while busy
 		PurgeMIDIBuffers();
 
-		if (m_pCurrentSynth == m_pSoundFontSynth)
-			m_pSoundFontSynth->ReportStatus();
+		m_pSoundFontSynth->ReportStatus();
 	}
+}
+
+bool CMT32Pi::ApplyLastInstrument()
+{
+	size_t nIndex;
+	if (m_LastState.nProgram < 0 || !m_pSoundFontSynth->FindPreset(m_LastState.nBank, m_LastState.nProgram, &nIndex))
+		return false;
+
+	LOGNOTE("Selecting instrument %d:%d", m_LastState.nBank, m_LastState.nProgram);
+	return m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels);
+}
+
+void CMT32Pi::DeferProgramChange(int nDelta)
+{
+	const size_t nPresets = m_pSoundFontSynth->GetPresetCount();
+	if (!nPresets)
+	{
+		LCDLog(TLCDLogType::Error, "No instruments!");
+		return;
+	}
+
+	CloseMenu();
+
+	size_t nIndex = m_bDeferredProgramChangeFlag ? m_nDeferredProgramChangeIndex : m_pSoundFontSynth->GetChannelPresetIndex(0);
+	nIndex = (nIndex + nPresets + nDelta) % nPresets;
+
+	char Name[32];
+	m_pSoundFontSynth->FormatPresetName(nIndex, Name, sizeof(Name));
+	LCDLog(TLCDLogType::Notice, "%s", Name);
+
+	m_nDeferredProgramChangeIndex = nIndex;
+	m_nDeferredProgramChangeTime  = CTimer::Get()->GetTicks();
+	m_bDeferredProgramChangeFlag  = true;
+}
+
+void CMT32Pi::ApplyProgramChange(size_t nIndex)
+{
+	m_bDeferredProgramChangeFlag = false;
+
+	bool bSamplesLoaded;
+	const bool bResult = m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels, &bSamplesLoaded);
+
+	// Drop notes played while loading rather than playing them late
+	if (bSamplesLoaded)
+		PurgeMIDIBuffers();
+
+	if (!bResult)
+		LCDLog(TLCDLogType::Error, "Out of memory!");
+	else if (m_pSoundFontSynth->GetPreset(nIndex, &m_LastState.nBank, &m_LastState.nProgram))
+		DeferSaveLastState();
+
+	Awaken();
 }
 
 void CMT32Pi::DeferSwitchSoundFont(size_t nIndex)
 {
-	if (m_pSoundFontSynth == nullptr)
-		return;
-
 	const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(nIndex);
 	LCDLog(TLCDLogType::Notice, "SF %ld: %s", nIndex, pName ? pName : "- N/A -");
 	m_nDeferredSoundFontSwitchIndex = nIndex;
@@ -1195,14 +1292,17 @@ void CMT32Pi::DeferSwitchSoundFont(size_t nIndex)
 void CMT32Pi::SetMasterVolume(s32 nVolume)
 {
 	m_nMasterVolume = Utility::Clamp(nVolume, 0, 100);
+	m_pSoundFontSynth->SetMasterVolume(m_nMasterVolume);
+	m_UserInterface.SetVolume(m_nMasterVolume);
 
-	if (m_pMT32Synth)
-		m_pMT32Synth->SetMasterVolume(m_nMasterVolume);
-	if (m_pSoundFontSynth)
-		m_pSoundFontSynth->SetMasterVolume(m_nMasterVolume);
+	m_LastState.nVolume = m_nMasterVolume;
+	DeferSaveLastState();
+}
 
-	if (m_pCurrentSynth == m_pSoundFontSynth)
-		LCDLog(TLCDLogType::Notice, "Volume: %d", m_nMasterVolume);
+void CMT32Pi::DeferSaveLastState()
+{
+	m_nLastStateChangeTime = CTimer::Get()->GetTicks();
+	m_bLastStateChanged    = true;
 }
 
 void CMT32Pi::LEDOn()
@@ -1214,7 +1314,7 @@ void CMT32Pi::LEDOn()
 
 void CMT32Pi::LCDLog(TLCDLogType Type, const char* pFormat...)
 {
-	if (!m_pLCD)
+	if (!m_pDisplay)
 		return;
 
 	char Buffer[256];
@@ -1224,19 +1324,22 @@ void CMT32Pi::LCDLog(TLCDLogType Type, const char* pFormat...)
 	vsnprintf(Buffer, sizeof(Buffer), pFormat, Args);
 	va_end(Args);
 
-	// LCD task hasn't started yet; print directly
+	// UI task hasn't started yet; draw directly
 	if (Type == TLCDLogType::Startup)
 	{
-		if (m_pLCD->GetType() == CLCD::TType::Graphical && !m_pConfig->SystemVerbose)
-			return;
-
-		u8 nOffsetX = CUserInterface::CenterMessageOffset(*m_pLCD, Buffer);
-		m_pLCD->Print(Buffer, nOffsetX, 1, true, true);
+		if (!m_bStartupDone)
+			m_UserInterface.ShowStartup(*m_pDisplay, MT32PiFullName, Buffer);
+		return;
 	}
 
-	// Let LCD task pick up the message in its next update
-	else
-		m_UserInterface.ShowSystemMessage(Buffer, Type == TLCDLogType::Spinner);
+	// Let UI task pick up the message in its next update
+	CUserInterface::TMessageType MessageType = CUserInterface::TMessageType::Notice;
+	if (Type == TLCDLogType::Error)
+		MessageType = CUserInterface::TMessageType::Error;
+	else if (Type == TLCDLogType::Warning)
+		MessageType = CUserInterface::TMessageType::Warning;
+
+	m_UserInterface.ShowSystemMessage(Buffer, Type == TLCDLogType::Spinner, MessageType);
 }
 
 const char* CMT32Pi::GetNetworkDeviceShortName() const
@@ -1291,112 +1394,46 @@ void CMT32Pi::IRQMIDIReceiveHandler(const u8* pData, size_t nSize)
 	}
 }
 
+void CMT32Pi::LoadProgressHandler(unsigned nMegabytes, void* pContext)
+{
+	CMT32Pi* const pThis = static_cast<CMT32Pi*>(pContext);
+
+	if (pThis->m_bStartupDone)
+		pThis->LCDLog(TLCDLogType::Spinner, "Loading %u MB", nMegabytes);
+	else
+		pThis->LCDLog(TLCDLogType::Startup, "Loading %u MB", nMegabytes);
+}
+
 void CMT32Pi::PanicHandler()
 {
-	if (!s_pThis || !s_pThis->m_pLCD)
+	if (!s_pThis || !s_pThis->m_pDisplay)
 		return;
 
-	// Kill UI task
+	// Kill UI task, if it is running already
 	s_pThis->m_bRunning = false;
-	while (!s_pThis->m_bUITaskDone)
+	while (s_pThis->m_bStartupDone && !s_pThis->m_bUITaskDone)
 		;
-
-	const char* pGuru = "Guru Meditation:";
-	u8 nOffsetX = CUserInterface::CenterMessageOffset(*s_pThis->m_pLCD, pGuru);
-	s_pThis->m_pLCD->Clear(true);
-	s_pThis->m_pLCD->Print(pGuru, nOffsetX, 0, true, true);
 
 	char Buffer[LOGGER_BUFSIZE];
 	CLogger::Get()->Read(Buffer, sizeof(Buffer), false);
 
-	// Find last newline
+	// Find the last message: after the second-last newline, past the timestamp and log source, without colour codes
+	const char* pMessage = "Unknown error";
 	char* pMessageStart = strrchr(Buffer, '\n');
-	if (!pMessageStart)
-		return;
-	*pMessageStart = '\0';
-
-	// Find second-last newline
-	pMessageStart = strrchr(Buffer, '\n');
-	if (!pMessageStart)
-		return;
-
-	// Skip past timestamp and log source, kill color control characters
-	pMessageStart = strstr(pMessageStart, ": ") + 2;
-	char* pMessageEnd = strstr(pMessageStart, "\x1B[0m");
-	*pMessageEnd = '\0';
-
-	const size_t nMessageLength = strlen(pMessageStart);
-	size_t nCurrentScrollOffset = 0;
-	const char* pGuruFlash = pGuru;
-	bool bFlash = false;
-
-	unsigned int nTicks = CTimer::GetClockTicks();
-	unsigned int nPanicStart = nTicks;
-	unsigned int nFlashTime = nTicks;
-	unsigned int nScrollTime = nTicks;
-
-	const u8 nWidth = s_pThis->m_pLCD->Width();
-	const u8 nHeight = s_pThis->m_pLCD->Height();
-
-	// TODO: API for getting width in pixels/characters for a string
-	const bool bGraphical = s_pThis->m_pLCD->GetType() == CLCD::TType::Graphical;
-	const size_t nCharWidth = bGraphical ? 20 : nWidth;
-
-	while (true)
+	if (pMessageStart)
 	{
-		s_pThis->m_pLCD->Clear(false);
-		nTicks = CTimer::GetClockTicks();
-
-		if (Utility::TicksToMillis(nTicks - nFlashTime) > 1000)
+		*pMessageStart = '\0';
+		pMessageStart = strrchr(Buffer, '\n');
+		pMessageStart = pMessageStart ? strstr(pMessageStart, ": ") : nullptr;
+		if (pMessageStart)
 		{
-			bFlash = !bFlash;
-			nFlashTime = nTicks;
+			pMessageStart += 2;
+			char* pMessageEnd = strstr(pMessageStart, "\x1B[0m");
+			if (pMessageEnd)
+				*pMessageEnd = '\0';
+			pMessage = pMessageStart;
 		}
-
-		if (nMessageLength > nCharWidth)
-		{
-			if (nMessageLength - nCurrentScrollOffset > nCharWidth)
-			{
-				const unsigned int nTimeout = nCurrentScrollOffset == 0 ? 1500 : 175;
-				if (Utility::TicksToMillis(nTicks - nScrollTime) >= nTimeout)
-				{
-					++nCurrentScrollOffset;
-					nScrollTime = nTicks;
-				}
-			}
-			else if (Utility::TicksToMillis(nTicks - nScrollTime) >= 3000)
-			{
-				nCurrentScrollOffset = 0;
-				nScrollTime = nTicks;
-			}
-		}
-
-		if (Utility::TicksToMillis(nTicks - nPanicStart) > 2 * 60 * 1000)
-			break;
-
-		if (!bGraphical)
-			pGuruFlash = bFlash ? "" : pGuru;
-
-		u8 nOffsetX = CUserInterface::CenterMessageOffset(*s_pThis->m_pLCD, pGuruFlash);
-		s_pThis->m_pLCD->Print(pGuruFlash, nOffsetX, 0, true, false);
-		s_pThis->m_pLCD->Print(pMessageStart + nCurrentScrollOffset, 0, 1, true, false);
-
-		if (bGraphical && bFlash)
-		{
-			s_pThis->m_pLCD->DrawFilledRect(0, 0, nWidth - 1, 1);
-			s_pThis->m_pLCD->DrawFilledRect(0, nHeight - 1, nWidth - 1, nHeight - 2);
-			s_pThis->m_pLCD->DrawFilledRect(0, 0, 1, nHeight - 1);
-			s_pThis->m_pLCD->DrawFilledRect(nWidth - 1, 0, nWidth - 2, nHeight - 1);
-		}
-
-		s_pThis->m_pLCD->Flip();
 	}
 
-	s_pThis->m_pLCD->Clear(true);
-	const char* pMessage = "System halted";
-	nOffsetX = CUserInterface::CenterMessageOffset(*s_pThis->m_pLCD, pMessage);
-	s_pThis->m_pLCD->Print(pMessage, nOffsetX, 0, true, true);
-	pMessage = "Please reboot";
-	nOffsetX = CUserInterface::CenterMessageOffset(*s_pThis->m_pLCD, pMessage);
-	s_pThis->m_pLCD->Print(pMessage, nOffsetX, 1, true, true);
+	s_pThis->m_UserInterface.ShowPanic(*s_pThis->m_pDisplay, pMessage);
 }

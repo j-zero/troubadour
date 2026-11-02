@@ -105,18 +105,33 @@ protected:
 class CControlSimpleEncoder : public CControl
 {
 public:
-	CControlSimpleEncoder(TEventQueue& pEventQueue, CRotaryEncoder::TEncoderType EncoderType, bool bEncoderReversed);
+	struct TEncoderPins
+	{
+		u8 nCLK;
+		u8 nDAT;
+		u8 nButton;
+	};
+
+	CControlSimpleEncoder(TEventQueue& pEventQueue, CRotaryEncoder::TEncoderType EncoderType, bool bEncoderReversed, const TEncoderPins& Encoder2Pins, bool bEncoder2Reversed);
 
 	virtual void Update() override;
 
 protected:
 	virtual void ReadGPIOPins() override;
 
+	void EnqueueEncoderEvent(u8 nEncoder, s8 nDelta);
+
 	CGPIOPin m_GPIOEncoderButton;
 	CGPIOPin m_GPIOButton1;
 	CGPIOPin m_GPIOButton2;
 
 	CRotaryEncoder m_Encoder;
+
+	TEncoderPins m_Encoder2Pins;
+	CGPIOPin m_GPIOEncoder2Button;
+	CRotaryEncoder m_Encoder2;
+
+	u8 m_nButtonMask;
 };
 
 #endif

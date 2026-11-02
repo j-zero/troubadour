@@ -51,6 +51,8 @@
 #include "control/control.h"
 #include "control/mister.h"
 #include "event.h"
+#include "laststate.h"
+#include "lcd/drivers/gc9a01.h"
 #include "lcd/ui.h"
 #include "midiparser.h"
 #include "net/applemidi.h"
@@ -59,10 +61,7 @@
 #include "pisound.h"
 #include "power.h"
 #include "ringbuffer.h"
-#include "synth/mt32romset.h"
-#include "synth/mt32synth.h"
 #include "synth/soundfontsynth.h"
-#include "synth/synth.h"
 
 //#define MONITOR_TEMPERATURE
 
@@ -88,6 +87,32 @@ private:
 
 	static constexpr size_t MIDIRxBufferSize = 2048;
 
+	// Buttons 1 and 2 select the instrument for these channels
+	// (one channel per string for MIDI guitars such as the Fishman TriplePlay)
+	static constexpr u8 ButtonProgramChannels = 6;
+	static constexpr unsigned ProgramChangeDelayMillis = 500;
+
+	// Settings are saved once they haven't changed for this long, so that turning the encoder doesn't write each step
+	static constexpr unsigned LastStateSaveDelayMillis = 2000;
+
+	// Menus of the simple_encoder scheme: the first encoder selects the instrument from a list, the second one
+	// changes the volume and the effects (pressing it selects the next parameter) and selects the SoundFont
+	enum class TMenu
+	{
+		None,
+		Instruments,
+		Parameter,
+		SoundFonts,
+	};
+
+	static constexpr unsigned MenuTimeoutMillis = 8000;
+
+	// Detents of the second encoder that follow each other this quickly change values in bigger steps
+	static constexpr unsigned ParameterFastTurnMicros = 25000;
+	static constexpr unsigned ParameterMediumTurnMicros = 60000;
+	static constexpr u8 ParameterPageVolume = 0;
+	static constexpr u8 ParameterPageCount  = 1 + static_cast<u8>(CSoundFontSynth::TEffect::Count);
+
 	// CPower
 	virtual void OnEnterPowerSavingMode() override;
 	virtual void OnExitPowerSavingMode() override;
@@ -110,8 +135,8 @@ private:
 
 	// Initialization
 	bool InitNetwork();
-	bool InitMT32Synth();
 	bool InitSoundFontSynth();
+	void RestoreLastState();
 
 	// Tasks for specific CPU cores
 	void MainTask();
@@ -127,14 +152,21 @@ private:
 
 	void ProcessEventQueue();
 	void ProcessButtonEvent(const TButtonEvent& Event);
+	void ProcessEncoderEvent(const TEncoderEvent& Event);
 
+	// Menus
+	void OpenMenu(TMenu Menu);
+	void CloseMenu();
+	void UpdateMenu();
+	void ChangeParameter(int nDelta);
 	// Actions that can be triggered via events
-	void SwitchSynth(TSynth Synth);
-	void SwitchMT32ROMSet(TMT32ROMSet ROMSet);
-	void NextMT32ROMSet();
 	void SwitchSoundFont(size_t nIndex);
 	void DeferSwitchSoundFont(size_t nIndex);
+	void DeferProgramChange(int nDelta);
+	void ApplyProgramChange(size_t nIndex);
+	bool ApplyLastInstrument();
 	void SetMasterVolume(s32 nVolume);
+	void DeferSaveLastState();
 
 	const char* GetNetworkDeviceShortName() const;
 	void LEDOn();
@@ -166,7 +198,7 @@ private:
 
 	CBcmRandomNumberGenerator m_Random;
 
-	CLCD* m_pLCD;
+	CGC9A01* m_pDisplay;
 	unsigned m_nLCDUpdateTime;
 	CUserInterface m_UserInterface;
 #ifdef MONITOR_TEMPERATURE
@@ -183,6 +215,24 @@ private:
 	bool m_bDeferredSoundFontSwitchFlag;
 	size_t m_nDeferredSoundFontSwitchIndex;
 	unsigned m_nDeferredSoundFontSwitchTime;
+
+	// Deferred instrument change, so that browsing through instruments doesn't load each of them
+	bool m_bDeferredProgramChangeFlag;
+	size_t m_nDeferredProgramChangeIndex;
+	unsigned m_nDeferredProgramChangeTime;
+
+	// Current menu and its selection
+	TMenu m_Menu;
+	u8 m_nParameterPage;
+	size_t m_nMenuIndex;
+	size_t m_nMenuCurrentIndex;
+	unsigned m_nMenuTime;
+	unsigned m_nLastParameterTurnTime;
+
+	// Settings that are restored on startup
+	CLastState m_LastState;
+	bool m_bLastStateChanged;
+	unsigned m_nLastStateChangeTime;
 
 	// Serial GPIO MIDI
 	bool m_bSerialMIDIAvailable;
@@ -207,10 +257,8 @@ private:
 	// Extra devices
 	CPisound* m_pPisound;
 
-	// Synthesizers
+	// Synthesizer
 	u8 m_nMasterVolume;
-	CSynthBase* m_pCurrentSynth;
-	CMT32Synth* m_pMT32Synth;
 	CSoundFontSynth* m_pSoundFontSynth;
 
 	// MIDI receive buffer
@@ -225,6 +273,10 @@ private:
 	static void IRQMIDIReceiveHandler(const u8* pData, size_t nSize);
 
 	static void PanicHandler();
+	static void LoadProgressHandler(unsigned nMegabytes, void* pContext);
+
+	// Set once the UI task owns the LCD; startup messages are printed directly before
+	volatile bool m_bStartupDone;
 
 	static CMT32Pi* s_pThis;
 };

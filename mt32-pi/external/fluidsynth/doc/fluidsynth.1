@@ -13,7 +13,7 @@
 .\" along with this program; see the file LICENSE.  If not, write to
 .\" the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
 .\"
-.TH FluidSynth 1 "Feb 2, 2025"
+.TH FluidSynth 1 "Feb 21, 2026"
 .\" Please update the above date whenever this man page is modified.
 .\"
 .\" Some roff macros, for reference:
@@ -72,6 +72,11 @@ of options.
 .B \-a, \-\-audio\-driver=[label]
 The audio driver to use.
 "\-a help" to list valid options
+.TP
+.B \-b, \-\-bank\-offset=[num]
+A positional flag that specifies the bank-offset for any
+Soundfonts following that flag. Can be specified multiple
+times.
 .TP
 .B \-c, \-\-audio\-bufcount=[count]
 Number of audio buffers
@@ -168,7 +173,7 @@ The settings to be specified with \-o are documented in the
 fluidsettings.xml
 hopefully shipped with this distribution
 or online at
-https://www.fluidsynth.org/api/fluidsettings.xml .
+https://www.fluidsynth.org/wiki/settings/ .
 We recommend viewing this file in a webbrowser,
 favourably Firefox.
 
@@ -237,6 +242,9 @@ Choose interpolation method for one channel
 .TP
 .B set synth.reverb.active [0|1]
 Turn the reverb on or off
+.TP
+.B set synth.reverb.engine
+Select reverb engine. Engine selection applies at synth creation.
 .TP
 .B set synth.reverb.room-size num
 Change reverb room size
@@ -340,4 +348,4 @@ Tom Moebert <tom[d0t]mbrt[ÄT]gmail[d0t]com>
 
 Please check the AUTHORS and THANKS files for all credits
 .SH DISCLAIMER
-SoundFont(R) is a registered trademark of E-mu Systems, Inc.
+SoundFont(R) was a registered trademark of Creative Technology Ltd.

@@ -13,9 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 #ifndef _FLUID_IIR_FILTER_H
@@ -106,7 +105,7 @@ void fluid_iir_filter_init_table(fluid_iir_sincos_t *sincos_table, fluid_real_t 
 void fluid_iir_filter_reset(fluid_iir_filter_t *iir_filter);
 
 void fluid_iir_filter_calc(fluid_iir_filter_t *iir_filter,
-                           fluid_real_t output_rate, fluid_real_t fres_mod);
+                           fluid_real_t max_fres_ct, fluid_real_t fres_mod);
 
 void fluid_iir_filter_apply(fluid_iir_filter_t *iir_filter,
                             fluid_iir_filter_t *custom_filter,

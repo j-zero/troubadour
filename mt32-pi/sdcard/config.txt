@@ -5,6 +5,9 @@ force_eeprom_read=0
 gpu_mem=16
 disable_overscan=1
 
+# Load address of 64-bit Circle kernels, as set in Circle's boot/config64.txt
+kernel_address=0x80000
+
 # Ensure stable I2C baud rate by locking the core clock
 core_freq=250
 core_freq_min=250

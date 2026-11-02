@@ -1,5 +1,11 @@
 macro ( ADD_FLUID_TEST _test )
-    add_executable( ${_test} ${_test}.c )
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_test}.c")
+        add_executable(${_test} ${_test}.c)
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_test}.cpp")
+        add_executable(${_test} ${_test}.cpp)
+    else()
+        message(FATAL_ERROR "Neither ${_test}.c nor ${_test}.cpp found in ${CMAKE_CURRENT_SOURCE_DIR}")
+    endif()
 
     # only build this unit test when explicitly requested by "make check"
     set_target_properties(${_test} PROPERTIES EXCLUDE_FROM_ALL TRUE)
@@ -8,7 +14,17 @@ macro ( ADD_FLUID_TEST _test )
     if ( FLUID_CPPFLAGS )
         set_target_properties ( ${_test} PROPERTIES COMPILE_FLAGS ${FLUID_CPPFLAGS} )
     endif ( FLUID_CPPFLAGS )
-    target_link_libraries( ${_test} libfluidsynth-OBJ )
+    # Link through an archive when the test provides a replacement library module.
+    if("${ARGN}" STREQUAL "LINK_AS_ARCHIVE")
+        add_library(${_test}-archive STATIC EXCLUDE_FROM_ALL
+            $<TARGET_OBJECTS:libfluidsynth-OBJ>
+            $<$<BOOL:${SIGNALSMITH_SUPPORT}>:$<TARGET_OBJECTS:fluid_limiter_impl-OBJ>>)
+        target_link_libraries(${_test}-archive PUBLIC libfluidsynth-OBJ
+            $<$<BOOL:${SIGNALSMITH_SUPPORT}>:fluid_limiter_impl-OBJ>)
+        target_link_libraries(${_test} ${_test}-archive)
+    else()
+        target_link_libraries( ${_test} libfluidsynth-OBJ $<$<BOOL:${SIGNALSMITH_SUPPORT}>:fluid_limiter_impl-OBJ> )
+    endif()
 
     # use the local include path to look for fluidsynth.h, as we cannot be sure fluidsynth is already installed
     target_include_directories(${_test}
@@ -16,11 +32,16 @@ macro ( ADD_FLUID_TEST _test )
     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include> # include auto generated headers
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> # include "normal" public (sub-)headers
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src> # include private headers
-    $<TARGET_PROPERTY:libfluidsynth-OBJ,INCLUDE_DIRECTORIES> # include all other header search paths needed by libfluidsynth (esp. glib)
+    $<TARGET_PROPERTY:libfluidsynth-OBJ,INCLUDE_DIRECTORIES> # include all other header search paths needed by libfluidsynth
     )
 
     # add the test to ctest
-    ADD_TEST(NAME ${_test} COMMAND ${_test})
+    if( NOT ANDROID )
+        ADD_TEST(NAME ${_test} COMMAND ${_test})
+        # All unit tests run fairly quick within a few seconds.
+        # Set a timeout of 120 seconds to ensure that tests do not hang indefinitely.
+        set_tests_properties(${_test} PROPERTIES TIMEOUT 120)
+    endif()
 
     # append the current unit test to check-target as dependency
     add_dependencies(check ${_test})
@@ -40,7 +61,8 @@ macro ( ADD_FLUID_TEST_UTIL _util )
     if ( FLUID_CPPFLAGS )
         set_target_properties ( ${_util} PROPERTIES COMPILE_FLAGS ${FLUID_CPPFLAGS} )
     endif ( FLUID_CPPFLAGS )
-    target_link_libraries( ${_util} libfluidsynth-OBJ )
+    target_link_libraries( ${_util} libfluidsynth-OBJ $<$<BOOL:${SIGNALSMITH_SUPPORT}>:fluid_limiter_impl-OBJ>
+ )
 
     # use the local include path to look for fluidsynth.h, as we cannot be sure fluidsynth is already installed
     target_include_directories(${_util}
@@ -48,7 +70,7 @@ macro ( ADD_FLUID_TEST_UTIL _util )
     $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include> # include auto generated headers
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> # include "normal" public (sub-)headers
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src> # include private headers
-    $<TARGET_PROPERTY:libfluidsynth-OBJ,INCLUDE_DIRECTORIES> # include all other header search paths needed by libfluidsynth (esp. glib)
+    $<TARGET_PROPERTY:libfluidsynth-OBJ,INCLUDE_DIRECTORIES> # include all other header search paths needed by libfluidsynth
     )
 
     # append the current unit test to check-target as dependency
@@ -104,10 +126,40 @@ macro ( ADD_FLUID_DEMO _demo )
     PUBLIC
         $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include> # include auto generated headers
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> # include "normal" public (sub-)headers
-        $<TARGET_PROPERTY:libfluidsynth,INCLUDE_DIRECTORIES> # include all other header search paths needed by libfluidsynth (esp. glib)
+        $<TARGET_PROPERTY:libfluidsynth,INCLUDE_DIRECTORIES> # include all other header search paths needed by libfluidsynth
     )
 
     # append the current unit test to check-target as dependency
     add_dependencies(demo ${_demo})
 
 endmacro ( ADD_FLUID_DEMO )
+
+# Render a file in parallel and attach it to an aggregate target.
+# This helper injects "-F <outfile>" so callers don't have to repeat it.
+#
+# Usage:
+#   add_render_job(agg outfile workdir
+#       <args for fluidsynth, e.g. -R 0 -C 0 -g 0.6 MIDI SF2>
+#   )
+function(add_render_job aggregate_target outfile)
+    # We reuse the work dir of the aggregate target to avoid having to specify it for each rendering job.
+    get_target_property(WD ${aggregate_target} WORKING_DIRECTORY)
+    if(NOT WD)
+        message(FATAL_ERROR "Aggregate target ${aggregate_target} must have a WORKING_DIRECTORY property set, explicitly via set_target_properties!")
+    endif()
+
+    string(SHA1 _job_hash "${aggregate_target}|${outfile}|${WD}")
+    string(SUBSTRING "${_job_hash}" 0 12 _job_hash12)
+    set(job_target "${aggregate_target}__${_job_hash12}")
+
+    add_custom_command(
+        OUTPUT "${outfile}"
+        COMMAND ${MANUAL_TEST_FLUIDSYNTH} -F "${outfile}" ${ARGN}
+        WORKING_DIRECTORY "${WD}"
+        VERBATIM
+        COMMENT "Rendering ${aggregate_target} -> ${outfile}"
+    )
+
+    add_custom_target("${job_target}" DEPENDS "${outfile}")
+    add_dependencies("${aggregate_target}" "${job_target}")
+endfunction()

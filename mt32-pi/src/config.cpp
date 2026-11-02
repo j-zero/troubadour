@@ -21,6 +21,7 @@
 //
 
 #include <cstdlib>
+#include <cstring>
 
 #include <circle/logger.h>
 #include <circle/util.h>
@@ -57,11 +58,7 @@ template <class T, const char* pEnumStrings[], size_t N> static bool ParseEnum(c
 	}
 
 // Enum string tables
-CONFIG_ENUM_STRINGS(TSystemDefaultSynth, ENUM_SYSTEMDEFAULTSYNTH);
 CONFIG_ENUM_STRINGS(TAudioOutputDevice, ENUM_AUDIOOUTPUTDEVICE);
-CONFIG_ENUM_STRINGS(TMT32EmuResamplerQuality, ENUM_RESAMPLERQUALITY);
-CONFIG_ENUM_STRINGS(TMT32EmuMIDIChannels, ENUM_MIDICHANNELS);
-CONFIG_ENUM_STRINGS(TMT32EmuROMSet, ENUM_MT32ROMSET);
 CONFIG_ENUM_STRINGS(TLCDType, ENUM_LCDTYPE);
 CONFIG_ENUM_STRINGS(TControlScheme, ENUM_CONTROLSCHEME);
 CONFIG_ENUM_STRINGS(TEncoderType, ENUM_ENCODERTYPE);
@@ -202,11 +199,7 @@ bool CConfig::ParseOption(const char* pString, CIPAddress* pOut)
 }
 
 // Define template function wrappers for parsing enums
-CONFIG_ENUM_PARSER(TSystemDefaultSynth);
 CONFIG_ENUM_PARSER(TAudioOutputDevice);
-CONFIG_ENUM_PARSER(TMT32EmuResamplerQuality);
-CONFIG_ENUM_PARSER(TMT32EmuMIDIChannels);
-CONFIG_ENUM_PARSER(TMT32EmuROMSet);
 CONFIG_ENUM_PARSER(TLCDType);
 CONFIG_ENUM_PARSER(TControlScheme);
 CONFIG_ENUM_PARSER(TEncoderType);

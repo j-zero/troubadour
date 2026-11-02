@@ -39,6 +39,7 @@ public:
 	const char* GetSoundFontName(size_t nIndex) const;
 	TFXProfile GetSoundFontFXProfile(size_t nIndex) const;
 	const char* GetFirstValidSoundFontPath() const;
+	bool FindSoundFont(const char* pPath, size_t* pIndex) const;
 
 	static constexpr size_t MaxSoundFonts = 512;
 

@@ -5,7 +5,7 @@
 include Config.mk
 
 .DEFAULT_GOAL=all
-.PHONY: submodules circle-stdlib mt32emu fluidsynth all clean veryclean
+.PHONY: submodules circle-stdlib fluidsynth all clean veryclean
 
 #
 # Functions to apply/reverse patches only if not completely applied/reversed already
@@ -82,38 +82,22 @@ $(CIRCLESTDLIBHOME)/.done: $(CIRCLE_STDLIB_CONFIG)
 	touch $@
 
 #
-# Build mt32emu
-#
-mt32emu: $(MT32EMUBUILDDIR)/.done
-
-$(MT32EMUBUILDDIR)/.done: $(CIRCLESTDLIBHOME)/.done
-	@CFLAGS="-Wno-array-bounds $(CFLAGS_EXTERNAL)" \
-	CXXFLAGS="$(CFLAGS_EXTERNAL)" \
-	cmake -B $(MT32EMUBUILDDIR) \
-		 $(CMAKE_TOOLCHAIN_FLAGS) \
-		 -DCMAKE_CXX_FLAGS_RELEASE="-Ofast" \
-		 -DCMAKE_BUILD_TYPE=Release \
-		 -Dlibmt32emu_C_INTERFACE=FALSE \
-		 -Dlibmt32emu_SHARED=FALSE \
-		 $(MT32EMUHOME) \
-		 >/dev/null
-	@cmake --build $(MT32EMUBUILDDIR)
-	@touch $@
-
-#
 # Build FluidSynth
 #
 fluidsynth: $(FLUIDSYNTHBUILDDIR)/.done
 
 $(FLUIDSYNTHBUILDDIR)/.done: $(CIRCLESTDLIBHOME)/.done
-	@${APPLY_PATCH} $(FLUIDSYNTHHOME) patches/fluidsynth-2.4.7-circle.patch
+	@${APPLY_PATCH} $(FLUIDSYNTHHOME) patches/fluidsynth-2.6.2-circle.patch
 
 	@CFLAGS="$(CFLAGS_EXTERNAL)" \
+	CXXFLAGS="$(CFLAGS_EXTERNAL)" \
 	cmake -B $(FLUIDSYNTHBUILDDIR) \
 		 $(CMAKE_TOOLCHAIN_FLAGS) \
-		 -DCMAKE_C_FLAGS_RELEASE="-Ofast -fopenmp-simd" \
+		 -DCMAKE_C_FLAGS_RELEASE="-Ofast -fopenmp-simd -DNDEBUG" \
 		 -DCMAKE_BUILD_TYPE=Release \
 		 -DBUILD_SHARED_LIBS=OFF \
+		 -Dosal=embedded \
+		 -Denable-alsa=OFF \
 		 -Denable-aufile=OFF \
 		 -Denable-dbus=OFF \
 		 -Denable-dsound=OFF \
@@ -121,9 +105,9 @@ $(FLUIDSYNTHBUILDDIR)/.done: $(CIRCLESTDLIBHOME)/.done
 		 -Denable-ipv6=OFF \
 		 -Denable-jack=OFF \
 		 -Denable-ladspa=OFF \
-		 -Denable-libinstpatch=OFF \
 		 -Denable-libsndfile=OFF \
 		 -Denable-midishare=OFF \
+		 -Denable-native-dls=OFF \
 		 -Denable-network=OFF \
 		 -Denable-oboe=OFF \
 		 -Denable-openmp=OFF \
@@ -132,8 +116,10 @@ $(FLUIDSYNTHBUILDDIR)/.done: $(CIRCLESTDLIBHOME)/.done
 		 -Denable-pipewire=OFF \
 		 -Denable-pulseaudio=OFF \
 		 -Denable-readline=OFF \
-		 -Denable-sdl2=OFF \
+		 -Denable-sdl3=OFF \
+		 -Denable-signalsmith=OFF \
 		 -Denable-threads=OFF \
+		 -Denable-wasapi=OFF \
 		 -Denable-waveout=OFF \
 		 -Denable-winmidi=OFF \
 		 $(FLUIDSYNTHHOME) \
@@ -144,7 +130,7 @@ $(FLUIDSYNTHBUILDDIR)/.done: $(CIRCLESTDLIBHOME)/.done
 #
 # Build kernel itself
 #
-all: circle-stdlib mt32emu fluidsynth
+all: circle-stdlib fluidsynth
 	@$(MAKE) -f Kernel.mk $(KERNEL).img $(KERNEL).hex
 
 #
@@ -159,14 +145,11 @@ clean:
 mrproper: clean
 # Reverse patches
 	@${REVERSE_PATCH} $(CIRCLESTDLIBHOME) patches/circle-std-config-mingw.patch
-	@${REVERSE_PATCH} $(FLUIDSYNTHHOME) patches/fluidsynth-2.4.7-circle.patch
+	@${REVERSE_PATCH} $(FLUIDSYNTHHOME) patches/fluidsynth-2.6.2-circle.patch
 
 # Clean circle-stdlib
 	@if [ -f $(CIRCLE_STDLIB_CONFIG) ]; then $(MAKE) -C $(CIRCLESTDLIBHOME) mrproper; fi
 	@$(RM) $(CIRCLESTDLIBHOME)/.done
-
-# Clean mt32emu
-	@$(RM) -r $(MT32EMUBUILDDIR)
 
 # Clean FluidSynth
 	@$(RM) -r $(FLUIDSYNTHBUILDDIR)

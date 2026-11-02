@@ -13,9 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 #include "fluid_midi.h"
@@ -166,7 +165,7 @@ fluid_file_read_full(fluid_file fp, size_t *length)
     size_t n;
 
     /* Work out the length of the file in advance */
-    if(FLUID_FSEEK(fp, 0, SEEK_END) != 0)
+    if(fluid_file_seek(fp, 0, SEEK_END) != 0)
     {
         FLUID_LOG(FLUID_ERR, "File load: Could not seek within file");
         return NULL;
@@ -174,7 +173,7 @@ fluid_file_read_full(fluid_file fp, size_t *length)
 
     buflen = ftell(fp);
 
-    if(FLUID_FSEEK(fp, 0, SEEK_SET) != 0)
+    if(fluid_file_seek(fp, 0, SEEK_SET) != 0)
     {
         FLUID_LOG(FLUID_ERR, "File load: Could not seek within file");
         return NULL;
@@ -872,6 +871,12 @@ fluid_midi_file_read_event(fluid_midi_file *mf, fluid_track_t *track)
             }
 
             tempo = (metadata[0] << 16) + (metadata[1] << 8) + metadata[2];
+            if(tempo == 0)
+            {
+                FLUID_LOG(FLUID_ERR, "Invalid zero tempo in MIDI file");
+                result = FLUID_FAILED;
+                break;
+            }
             evt = new_fluid_midi_event();
 
             if(evt == NULL)
@@ -1620,10 +1625,11 @@ fluid_track_send_events(fluid_track_t *track,
         {
             if(player->playback_callback)
             {
+                int *chan_is_playing = &player->channel_isplaying[event->channel % MAX_NUMBER_OF_CHANNELS];
                 player->playback_callback(player->playback_userdata, event);
-                if(event->type == NOTE_ON && event->param2 != 0 && !player->channel_isplaying[event->channel])
+                if(event->type == NOTE_ON && event->param2 != 0 && !*chan_is_playing)
                 {
-                    player->channel_isplaying[event->channel] = TRUE;
+                    *chan_is_playing = TRUE;
                 }
             }
         }
@@ -2141,7 +2147,7 @@ fluid_player_callback(void *data, unsigned int msec)
     {
         if(fluid_atomic_int_get(&player->stopping))
         {
-            for(i = 0; i < synth->midi_channels; i++)
+            for(i = 0; i < MAX_NUMBER_OF_CHANNELS; i++)
             {
                 if(player->channel_isplaying[i])
                 {
@@ -2189,7 +2195,7 @@ fluid_player_callback(void *data, unsigned int msec)
         seek_ticks = fluid_atomic_int_get(&player->seek_ticks);
         if(seek_ticks >= 0)
         {
-            for(i = 0; i < synth->midi_channels; i++)
+            for(i = 0; i < MAX_NUMBER_OF_CHANNELS; i++)
             {
                 if(player->channel_isplaying[i])
                 {
@@ -2575,7 +2581,7 @@ int fluid_player_set_bpm(fluid_player_t *player, int bpm)
         return FLUID_FAILED; /* to avoid a division by 0 */
     }
 
-    return fluid_player_set_midi_tempo(player, 60000000L / bpm);
+    return fluid_player_set_tempo(player, FLUID_PLAYER_TEMPO_EXTERNAL_BPM, (double)bpm);
 }
 
 /**
@@ -2688,8 +2694,8 @@ int fluid_player_get_midi_tempo(fluid_player_t *player)
     /* look if the player is internally synced */
     if(fluid_atomic_int_get(&player->sync_mode))
     {
-        midi_tempo = (int)((float)fluid_atomic_int_get(&player->miditempo)/
-                           fluid_atomic_float_get(&player->multempo));
+        int tempo = fluid_atomic_int_get(&player->miditempo);
+        midi_tempo = (float)tempo / fluid_atomic_float_get(&player->multempo);
     }
 
     return midi_tempo;
@@ -2752,7 +2758,10 @@ fluid_midi_parser_parse(fluid_midi_parser_t *parser, unsigned char c)
     if(c >= 0xF8)
     {
         parser->event.type = c;
-        parser->status = 0; /* clear the status */
+        if(c == MIDI_SYSTEM_RESET)
+        {
+            parser->status = 0; /* clear the status */
+        }
         return &parser->event;
     }
 

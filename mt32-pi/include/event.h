@@ -26,8 +26,6 @@
 #include "control/button.h"
 #include "lcd/images.h"
 #include "ringbuffer.h"
-#include "synth/mt32romset.h"
-#include "synth/synth.h"
 
 struct TButtonEvent
 {
@@ -38,17 +36,8 @@ struct TButtonEvent
 
 struct TEncoderEvent
 {
+	u8 nEncoder;
 	s8 nDelta;
-};
-
-struct TSwitchSynthEvent
-{
-	TSynth Synth;
-};
-
-struct TSwitchMT32ROMSetEvent
-{
-	TMT32ROMSet ROMSet;
 };
 
 struct TSwitchSoundFontEvent
@@ -70,8 +59,6 @@ enum class TEventType
 {
 	Button,
 	Encoder,
-	SwitchSynth,
-	SwitchMT32ROMSet,
 	SwitchSoundFont,
 	AllSoundOff,
 	DisplayImage,
@@ -85,8 +72,6 @@ struct TEvent
 	{
 		TButtonEvent Button;
 		TEncoderEvent Encoder;
-		TSwitchSynthEvent SwitchSynth;
-		TSwitchMT32ROMSetEvent SwitchMT32ROMSet;
 		TSwitchSoundFontEvent SwitchSoundFont;
 		TAllSoundOffEvent AllSoundOff;
 		TDisplayImageEvent DisplayImage;

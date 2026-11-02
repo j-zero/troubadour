@@ -20,6 +20,8 @@
 // mt32-pi. If not, see <http://www.gnu.org/licenses/>.
 //
 
+#include <cstring>
+
 #include <circle/logger.h>
 #include <circle/util.h>
 #include <fatfs/ff.h>
@@ -178,6 +180,21 @@ TFXProfile CSoundFontManager::GetSoundFontFXProfile(size_t nIndex) const
 const char* CSoundFontManager::GetFirstValidSoundFontPath() const
 {
 	return m_nSoundFonts > 0 ? static_cast<const char*>(m_SoundFontList[0].Path) : nullptr;
+}
+
+bool CSoundFontManager::FindSoundFont(const char* pPath, size_t* pIndex) const
+{
+	// FAT file names are case-insensitive
+	for (size_t i = 0; i < m_nSoundFonts; ++i)
+	{
+		if (!strcasecmp(m_SoundFontList[i].Path, pPath))
+		{
+			*pIndex = i;
+			return true;
+		}
+	}
+
+	return false;
 }
 
 void CSoundFontManager::CheckSoundFont(const char* pFullPath, const char* pFileName)

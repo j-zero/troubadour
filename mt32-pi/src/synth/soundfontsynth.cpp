@@ -22,6 +22,7 @@
 
 #include <fatfs/ff.h>
 #include <circle/logger.h>
+#include <circle/spinlock.h>
 #include <circle/timer.h>
 
 #include "config.h"
@@ -36,97 +37,195 @@
 LOGMODULE("soundfontsynth");
 const char SoundFontPath[] = "soundfonts";
 
+// Counts allocations that failed, so that an instrument that didn't fit into memory can be detected
+static unsigned s_nFailedAllocs = 0;
+
 extern "C"
 {
 	// Replacements for fluid_sys.c functions
 	void* fluid_alloc(size_t len)
 	{
-		return CZoneAllocator::Get()->Alloc(len, TZoneTag::FluidSynth);
+		void* ptr = CZoneAllocator::Get()->Alloc(len, TZoneTag::FluidSynth);
+		if (!ptr && len)
+			++s_nFailedAllocs;
+		return ptr;
 	}
 
 	void* fluid_realloc(void* ptr, size_t len)
 	{
-		return CZoneAllocator::Get()->Realloc(ptr, len, TZoneTag::FluidSynth);
+		void* new_ptr = CZoneAllocator::Get()->Realloc(ptr, len, TZoneTag::FluidSynth);
+		if (!new_ptr && len)
+			++s_nFailedAllocs;
+		return new_ptr;
 	}
 
 	void fluid_free(void* ptr)
 	{
 		CZoneAllocator::Get()->Free(ptr);
 	}
+}
 
-	FILE* fluid_file_open(const char* path, const char** errMsg)
+// Enough for roughly 500 file fragments; FatFs falls back on walking the FAT if a file needs more
+constexpr size_t ClusterMapSize = 1024;
+
+struct TSoundFontFile
+{
+	FIL File;
+	DWORD ClusterMap[ClusterMapSize];
+};
+
+static CSpinLock* s_pSynthLock = nullptr;
+
+// While set, the UI shows a spinner as soon as FluidSynth starts loading sample data
+static CUserInterface* s_pLoadingUI = nullptr;
+static bool s_bSamplesLoaded = false;
+
+// Progress of reading the SoundFont file, for long loads
+constexpr unsigned LoadProgressPeriodMicros = 250000;
+constexpr u64 BytesPerMegabyte = 1024 * 1024;
+static CSoundFontSynth::TLoadProgressHandler s_pLoadProgressHandler = nullptr;
+static void* s_pLoadProgressContext = nullptr;
+static u64 s_nLoadedBytes = 0;
+static unsigned s_nLoadProgressTime = 0;
+
+// With dynamic sample loading, FluidSynth reads from the SD card from within calls that are made with the
+// synth lock held. The lock must be dropped for the duration of any file access; the audio task would stall
+// otherwise, and the SD card driver sleeps in the scheduler, so another task could spin on the lock forever.
+// This is safe because the audio task only touches voices and the sample data they already hold.
+class CUnlockedFileAccess
+{
+public:
+	CUnlockedFileAccess() { s_pSynthLock->Release(); }
+	~CUnlockedFileAccess() { s_pSynthLock->Acquire(); }
+};
+
+// File callbacks for FluidSynth's SoundFont loader; must be called with the synth lock held
+// These were found to be much faster than FluidSynth's default approach of going through libc
+static void* SoundFontOpen(const char* pPath)
+{
+	CUnlockedFileAccess Unlocked;
+
+	// FluidSynth opens the file whenever a preset needs sample data that isn't in memory
+	if (s_pLoadingUI && !s_bSamplesLoaded)
+		s_pLoadingUI->ShowSystemMessage("Loading samples", true);
+	s_bSamplesLoaded = true;
+
+	s_nLoadedBytes      = 0;
+	s_nLoadProgressTime = CTimer::GetClockTicks();
+
+	TSoundFontFile* pFile = new TSoundFontFile;
+	if (f_open(&pFile->File, pPath, FA_READ) != FR_OK)
 	{
-		FILE* pFile = fopen(path, "rb");
-
-		if (!pFile && errMsg)
-			*errMsg = "Failed to open file";
-
-		return pFile;
+		delete pFile;
+		return nullptr;
 	}
 
-	void fluid_msleep(unsigned int msecs) { CTimer::SimpleMsDelay(msecs); }
-	double fluid_utime() { return static_cast<double>(CTimer::GetClockTicks()); }
+	// Seeks need to walk the FAT from the start of the file without a cluster map, which is far too slow for
+	// picking individual samples out of a large SoundFont
+	pFile->ClusterMap[0] = ClusterMapSize;
+	pFile->File.cltbl = pFile->ClusterMap;
+	if (f_lseek(&pFile->File, CREATE_LINKMAP) != FR_OK)
+		pFile->File.cltbl = nullptr;
 
-	// Replacements for fluid_sfont.c functions
-	// These were found to be much faster than FluidSynth's default approach of going through libc
-	void* default_fopen(const char* path)
+	return pFile;
+}
+
+static int SoundFontClose(void* pHandle)
+{
+	CUnlockedFileAccess Unlocked;
+
+	TSoundFontFile* pFile = static_cast<TSoundFontFile*>(pHandle);
+	const FRESULT Result = f_close(&pFile->File);
+	delete pFile;
+
+	return Result == FR_OK ? FLUID_OK : FLUID_FAILED;
+}
+
+static fluid_long_long_t SoundFontTell(void* pHandle)
+{
+	return f_tell(&static_cast<TSoundFontFile*>(pHandle)->File);
+}
+
+static int SoundFontRead(void* pBuffer, fluid_long_long_t nCount, void* pHandle)
+{
+	CUnlockedFileAccess Unlocked;
+
+	UINT nRead;
+	const FRESULT Result = f_read(&static_cast<TSoundFontFile*>(pHandle)->File, pBuffer, nCount, &nRead);
+
+	// Only sample data adds up to megabytes; the SoundFont's structure is much smaller
+	s_nLoadedBytes += nRead;
+	const unsigned nTicks = CTimer::GetClockTicks();
+	if (s_pLoadProgressHandler && s_nLoadedBytes >= BytesPerMegabyte && nTicks - s_nLoadProgressTime >= LoadProgressPeriodMicros)
 	{
-		FIL* pFile = new FIL;
-		if (f_open(pFile, path, FA_READ) != FR_OK)
-		{
-			delete pFile;
-			pFile = nullptr;
-		}
-
-		return pFile;
+		s_nLoadProgressTime = nTicks;
+		s_pLoadProgressHandler(s_nLoadedBytes / BytesPerMegabyte, s_pLoadProgressContext);
 	}
 
-	int default_fclose(void* handle)
+	return Result == FR_OK && nRead == nCount ? FLUID_OK : FLUID_FAILED;
+}
+
+static int SoundFontSeek(void* pHandle, fluid_long_long_t nOffset, int nWhence)
+{
+	CUnlockedFileAccess Unlocked;
+
+	FIL* pFile = &static_cast<TSoundFontFile*>(pHandle)->File;
+
+	switch (nWhence)
 	{
-		FIL* pFile = static_cast<FIL*>(handle);
+	case SEEK_CUR:
+		nOffset += f_tell(pFile);
+		break;
 
-		if (f_close(pFile) == FR_OK)
-		{
-			delete pFile;
-			return FLUID_OK;
-		}
+	case SEEK_END:
+		nOffset += f_size(pFile);
+		break;
 
-		return FLUID_FAILED;
+	default:
+		break;
 	}
 
-	fluid_long_long_t default_ftell(void* handle)
+	return f_lseek(pFile, nOffset) == FR_OK ? FLUID_OK : FLUID_FAILED;
+}
+
+// Serializes tasks using the synth, as a file access in one task can let another task run
+class CTaskLockHolder
+{
+public:
+	CTaskLockHolder(CMutex& Mutex) : m_Mutex(Mutex) { m_Mutex.Acquire(); }
+	~CTaskLockHolder() { m_Mutex.Release(); }
+
+private:
+	CMutex& m_Mutex;
+};
+
+// Reports any sample loading caused by a MIDI message or instrument change for the duration of its scope
+class CSampleLoadReporter
+{
+public:
+	CSampleLoadReporter(CUserInterface* pUI)
 	{
-		FIL* pFile = static_cast<FIL*>(handle);
-		return f_tell(pFile);
+		s_pLoadingUI     = pUI;
+		s_bSamplesLoaded = false;
 	}
 
-	int safe_fread(void* buf, fluid_long_long_t count, void* fd)
+	~CSampleLoadReporter()
 	{
-		FIL* pFile = static_cast<FIL*>(fd);
-		UINT nRead;
-		return f_read(pFile, buf, count, &nRead) == FR_OK ? FLUID_OK : FLUID_FAILED;
+		if (s_bSamplesLoaded && s_pLoadingUI)
+			s_pLoadingUI->ClearSpinnerMessage();
+
+		s_pLoadingUI = nullptr;
 	}
 
-	int safe_fseek(void* fd, fluid_long_long_t ofs, int whence)
-	{
-		FIL* pFile = static_cast<FIL*>(fd);
+	bool SamplesLoaded() const { return s_bSamplesLoaded; }
+};
 
-		switch (whence)
-		{
-		case SEEK_CUR:
-			ofs += f_tell(pFile);
-			break;
-
-		case SEEK_END:
-			ofs += f_size(pFile);
-			break;
-
-		default:
-			break;
-		}
-
-		return f_lseek(pFile, ofs) == FR_OK ? FLUID_OK : FLUID_FAILED;
-	}
+static void FormatProgramName(char* pBuffer, size_t nSize, int nBank, int nProgram, const char* pName)
+{
+	if (nBank)
+		snprintf(pBuffer, nSize, "%03d.%d %s", nProgram + 1, nBank, pName);
+	else
+		snprintf(pBuffer, nSize, "%03d %s", nProgram + 1, pName);
 }
 
 CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
@@ -138,13 +237,29 @@ CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
 	  m_nVolume(100),
 	  m_nInitialGain(0.2f),
 
+	  m_bReverbActive(false),
+	  m_bChorusActive(false),
+
 	  m_nPercussionMask(1 << 9),
-	  m_nCurrentSoundFontIndex(0)
+	  m_nCurrentSoundFontIndex(0),
+
+	  m_nSoundFontID(FLUID_FAILED),
+	  m_pPresets(nullptr),
+	  m_nPresets(0),
+	  m_nOutOfMemoryPresetIndex(0),
+	  m_DefaultBanks{0},
+	  m_DefaultPrograms{0},
+	  m_nDefaultProgramMask(0),
+
+	  m_DisplayInfoLock(TASK_LEVEL),
+	  m_DisplayInfo{}
 {
 }
 
 CSoundFontSynth::~CSoundFontSynth()
 {
+	delete[] m_pPresets;
+
 	if (m_pSynth)
 		delete_fluid_synth(m_pSynth);
 
@@ -152,9 +267,17 @@ CSoundFontSynth::~CSoundFontSynth()
 		delete_fluid_settings(m_pSettings);
 }
 
+void CSoundFontSynth::SetLoadProgressHandler(TLoadProgressHandler pHandler, void* pContext)
+{
+	s_pLoadProgressHandler = pHandler;
+	s_pLoadProgressContext = pContext;
+}
+
 void CSoundFontSynth::FluidSynthLogCallback(int nLevel, const char* pMessage, void* pUser)
 {
-	CLogger::Get()->Write(From, static_cast<TLogSeverity>(nLevel), pMessage);
+	// FluidSynth reports running out of memory as a panic, but recovers from it; Circle's LogPanic would halt the system
+	const TLogSeverity Severity = nLevel == FLUID_PANIC ? LogError : static_cast<TLogSeverity>(nLevel);
+	CLogger::Get()->Write(From, Severity, pMessage);
 }
 
 bool CSoundFontSynth::Initialize()
@@ -165,7 +288,11 @@ bool CSoundFontSynth::Initialize()
 		return false;
 
 	// Try to get preferred SoundFont
-	m_nCurrentSoundFontIndex = pConfig->FluidSynthSoundFont;
+	size_t nInitialIndex;
+	if (m_InitialSoundFontPath.GetLength() && m_SoundFontManager.FindSoundFont(m_InitialSoundFontPath, &nInitialIndex))
+		m_nCurrentSoundFontIndex = nInitialIndex;
+	else
+		m_nCurrentSoundFontIndex = pConfig->FluidSynthSoundFont;
 	const char* pSoundFontPath = m_SoundFontManager.GetSoundFontPath(m_nCurrentSoundFontIndex);
 
 	// Fall back on first available SoundFont
@@ -199,8 +326,15 @@ bool CSoundFontSynth::Initialize()
 	fluid_settings_setint(m_pSettings, "synth.device-id", static_cast<int>(TDeviceID::SoundCanvasDefault));
 	fluid_settings_setnum(m_pSettings, "synth.sample-rate", static_cast<double>(m_nSampleRate));
 	fluid_settings_setint(m_pSettings, "synth.threadsafe-api", false);
+	fluid_settings_setint(m_pSettings, "synth.dynamic-sample-loading", pConfig->FluidSynthDynamicSamples);
 
-	return Reinitialize(pSoundFontPath, &FXProfile);
+	s_pSynthLock = &m_Lock;
+
+	if (!Reinitialize(pSoundFontPath, &FXProfile))
+		return false;
+
+	UpdateSoundFontName();
+	return true;
 }
 
 void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
@@ -210,11 +344,15 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 	const u8 nData1   = (nMessage >> 8) & 0xFF;
 	const u8 nData2   = (nMessage >> 16) & 0xFF;
 
+	CTaskLockHolder TaskLock(m_TaskLock);
+	CSampleLoadReporter LoadReporter(m_pUI);
+
 	// Handle system real-time messages
 	if (nStatus == 0xFF)
 	{
 		m_Lock.Acquire();
 		fluid_synth_system_reset(m_pSynth);
+		UpdateDefaultPrograms();
 		m_Lock.Release();
 		return;
 	}
@@ -231,6 +369,8 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 
 		// Note on
 		case 0x90:
+			if (nData2 && (m_nDefaultProgramMask & (1 << nChannel)))
+				LoadDefaultProgram(nChannel);
 			fluid_synth_noteon(m_pSynth, nChannel, nData1, nData2);
 			break;
 
@@ -247,6 +387,9 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 		// Program change
 		case 0xC0:
 			fluid_synth_program_change(m_pSynth, nChannel, nData1);
+			m_nDefaultProgramMask &= ~(1 << nChannel);
+			if (nChannel == 0)
+				UpdateProgramName();
 			break;
 
 		// Channel pressure/aftertouch
@@ -273,13 +416,17 @@ void CSoundFontSynth::HandleMIDISysExMessage(const u8* pData, size_t nSize)
 		return;
 
 	// No special handling; forward to FluidSynth SysEx parser, excluding leading 0xF0 and trailing 0xF7
+	CTaskLockHolder TaskLock(m_TaskLock);
+	CSampleLoadReporter LoadReporter(m_pUI);
 	m_Lock.Acquire();
 	fluid_synth_sysex(m_pSynth, reinterpret_cast<const char*>(pData + 1), nSize - 2, nullptr, nullptr, nullptr, false);
+	UpdateDefaultPrograms();
 	m_Lock.Release();
 }
 
 bool CSoundFontSynth::IsActive()
 {
+	CTaskLockHolder TaskLock(m_TaskLock);
 	m_Lock.Acquire();
 	int nVoices = fluid_synth_get_active_voice_count(m_pSynth);
 	m_Lock.Release();
@@ -289,9 +436,12 @@ bool CSoundFontSynth::IsActive()
 
 void CSoundFontSynth::AllSoundOff()
 {
-	m_Lock.Acquire();
-	fluid_synth_all_sounds_off(m_pSynth, -1);
-	m_Lock.Release();
+	{
+		CTaskLockHolder TaskLock(m_TaskLock);
+		m_Lock.Acquire();
+		fluid_synth_all_sounds_off(m_pSynth, -1);
+		m_Lock.Release();
+	}
 
 	// Reset MIDI monitor
 	CSynthBase::AllSoundOff();
@@ -300,6 +450,7 @@ void CSoundFontSynth::AllSoundOff()
 void CSoundFontSynth::SetMasterVolume(u8 nVolume)
 {
 	m_nVolume = nVolume;
+	CTaskLockHolder TaskLock(m_TaskLock);
 	m_Lock.Acquire();
 	fluid_synth_set_gain(m_pSynth, m_nVolume / 100.0f * m_nInitialGain);
 	m_Lock.Release();
@@ -327,12 +478,265 @@ void CSoundFontSynth::ReportStatus() const
 		m_pUI->ShowSystemMessage(m_SoundFontManager.GetSoundFontName(m_nCurrentSoundFontIndex));
 }
 
-void CSoundFontSynth::UpdateLCD(CLCD& LCD, unsigned int nTicks)
+void CSoundFontSynth::GetChannelLevels(unsigned int nTicks, float* pLevels, float* pPeaks)
 {
-	const u8 nBarHeight = LCD.Height();
-	float ChannelLevels[16], PeakLevels[16];
-	m_MIDIMonitor.GetChannelLevels(nTicks, ChannelLevels, PeakLevels, m_nPercussionMask);
-	CUserInterface::DrawChannelLevels(LCD, nBarHeight, ChannelLevels, PeakLevels, 16, true);
+	m_MIDIMonitor.GetChannelLevels(nTicks, pLevels, pPeaks, m_nPercussionMask);
+}
+
+void CSoundFontSynth::GetDisplayInfo(TDisplayInfo& Info)
+{
+	m_DisplayInfoLock.Acquire();
+	Info = m_DisplayInfo;
+	m_DisplayInfoLock.Release();
+}
+
+void CSoundFontSynth::UpdateSoundFontName()
+{
+	const char* pName = m_SoundFontManager.GetSoundFontName(m_nCurrentSoundFontIndex);
+
+	m_DisplayInfoLock.Acquire();
+	snprintf(m_DisplayInfo.SoundFontName, sizeof(m_DisplayInfo.SoundFontName), "%s", pName ? pName : "");
+	m_DisplayInfoLock.Release();
+}
+
+size_t CSoundFontSynth::GetChannelPresetIndex(u8 nChannel)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+
+	int nSoundFontID, nBank, nProgram;
+	m_Lock.Acquire();
+	fluid_synth_get_program(m_pSynth, nChannel, &nSoundFontID, &nBank, &nProgram);
+	const bool bUnset = !fluid_synth_get_channel_preset(m_pSynth, nChannel) && !(m_nDefaultProgramMask & (1 << nChannel));
+	m_Lock.Release();
+
+	// Continue browsing from an instrument that didn't fit into memory
+	if (bUnset)
+		return m_nOutOfMemoryPresetIndex;
+
+	// First preset at or after the current one
+	for (size_t i = 0; i < m_nPresets; ++i)
+	{
+		if (m_pPresets[i].nProgram > nProgram || (m_pPresets[i].nProgram == nProgram && m_pPresets[i].nBank >= nBank))
+			return i;
+	}
+
+	return 0;
+}
+
+bool CSoundFontSynth::GetPreset(size_t nIndex, int* pBank, int* pProgram)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+
+	if (nIndex >= m_nPresets)
+		return false;
+
+	*pBank    = m_pPresets[nIndex].nBank;
+	*pProgram = m_pPresets[nIndex].nProgram;
+	return true;
+}
+
+bool CSoundFontSynth::FindPreset(int nBank, int nProgram, size_t* pIndex)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+
+	for (size_t i = 0; i < m_nPresets; ++i)
+	{
+		if (m_pPresets[i].nBank == nBank && m_pPresets[i].nProgram == nProgram)
+		{
+			*pIndex = i;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void CSoundFontSynth::FormatPresetName(size_t nIndex, char* pBuffer, size_t nSize)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+
+	if (nIndex >= m_nPresets)
+	{
+		snprintf(pBuffer, nSize, "No instrument");
+		return;
+	}
+
+	const TPreset& Preset = m_pPresets[nIndex];
+
+	m_Lock.Acquire();
+	fluid_sfont_t* pSoundFont = fluid_synth_get_sfont_by_id(m_pSynth, m_nSoundFontID);
+	fluid_preset_t* pPreset = pSoundFont ? fluid_sfont_get_preset(pSoundFont, Preset.nBank, Preset.nProgram) : nullptr;
+	FormatProgramName(pBuffer, nSize, Preset.nBank, Preset.nProgram, pPreset ? fluid_preset_get_name(pPreset) : "?");
+	m_Lock.Release();
+}
+
+bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+	CSampleLoadReporter LoadReporter(m_pUI);
+
+	if (pSamplesLoaded)
+		*pSamplesLoaded = false;
+
+	if (nIndex >= m_nPresets)
+		return false;
+
+	const TPreset& Preset = m_pPresets[nIndex];
+	const u8 nLastChannel = nFirstChannel + nChannels;
+
+	m_Lock.Acquire();
+
+	// Release the samples of the current instrument first; otherwise, both instruments would have to fit into
+	// memory at the same time, as the channels still holding the old one keep its samples loaded
+	for (u8 nChannel = nFirstChannel; nChannel < nLastChannel; ++nChannel)
+	{
+		fluid_synth_all_sounds_off(m_pSynth, nChannel);
+		fluid_synth_unset_program(m_pSynth, nChannel);
+		m_nDefaultProgramMask &= ~(1 << nChannel);
+	}
+
+	// Channels share the sample data, so it is only loaded once
+	const unsigned nFailedAllocs = s_nFailedAllocs;
+	for (u8 nChannel = nFirstChannel; nChannel < nLastChannel; ++nChannel)
+		fluid_synth_program_select(m_pSynth, nChannel, m_nSoundFontID, Preset.nBank, Preset.nProgram);
+
+	// FluidSynth disables the samples that didn't fit; free the incomplete instrument rather than playing it
+	const bool bOutOfMemory = s_nFailedAllocs != nFailedAllocs;
+	if (bOutOfMemory)
+	{
+		LOGERR("Not enough memory for instrument %d:%d", Preset.nBank, Preset.nProgram);
+		m_nOutOfMemoryPresetIndex = nIndex;
+		for (u8 nChannel = nFirstChannel; nChannel < nLastChannel; ++nChannel)
+			fluid_synth_unset_program(m_pSynth, nChannel);
+	}
+
+	UpdateProgramName();
+	m_Lock.Release();
+
+	if (pSamplesLoaded)
+		*pSamplesLoaded = LoadReporter.SamplesLoaded();
+
+	return !bOutOfMemory;
+}
+
+const CSoundFontSynth::TEffectInfo& CSoundFontSynth::GetEffectInfo(TEffect Effect)
+{
+	static const TEffectInfo EffectInfo[] =
+	{
+		{ "Reverb level",     0.0f,  1.0f, 0.05f, 2 },
+		{ "Reverb room",      0.0f,  1.0f, 0.05f, 2 },
+		{ "Reverb damping",   0.0f,  1.0f, 0.05f, 2 },
+		{ "Reverb width",     0.0f, 10.0f, 0.1f,  1 },
+		{ "Chorus level",     0.0f, 10.0f, 0.1f,  1 },
+		{ "Chorus depth",     0.0f, 64.0f, 0.5f,  1 },
+		{ "Chorus speed",     0.1f,  5.0f, 0.05f, 2 },
+		{ "Chorus voices",    0.0f, 99.0f, 1.0f,  0 },
+	};
+	static_assert(Utility::ArraySize(EffectInfo) == static_cast<size_t>(TEffect::Count), "Missing effect info");
+
+	return EffectInfo[static_cast<size_t>(Effect)];
+}
+
+float CSoundFontSynth::GetEffect(TEffect Effect)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+
+	double nValue = 0.0;
+	int nVoices = 0;
+
+	m_Lock.Acquire();
+	switch (Effect)
+	{
+		// An effect that is turned off is shown with a level of 0
+		case TEffect::ReverbLevel:
+			if (m_bReverbActive)
+				fluid_synth_get_reverb_group_level(m_pSynth, -1, &nValue);
+			break;
+
+		case TEffect::ReverbRoomSize:	fluid_synth_get_reverb_group_roomsize(m_pSynth, -1, &nValue);	break;
+		case TEffect::ReverbDamping:	fluid_synth_get_reverb_group_damp(m_pSynth, -1, &nValue);	break;
+		case TEffect::ReverbWidth:	fluid_synth_get_reverb_group_width(m_pSynth, -1, &nValue);	break;
+
+		case TEffect::ChorusLevel:
+			if (m_bChorusActive)
+				fluid_synth_get_chorus_group_level(m_pSynth, -1, &nValue);
+			break;
+
+		case TEffect::ChorusDepth:	fluid_synth_get_chorus_group_depth(m_pSynth, -1, &nValue);	break;
+		case TEffect::ChorusSpeed:	fluid_synth_get_chorus_group_speed(m_pSynth, -1, &nValue);	break;
+
+		case TEffect::ChorusVoices:
+			fluid_synth_get_chorus_group_nr(m_pSynth, -1, &nVoices);
+			nValue = nVoices;
+			break;
+
+		default:
+			break;
+	}
+	m_Lock.Release();
+
+	return nValue;
+}
+
+void CSoundFontSynth::SetEffect(TEffect Effect, float nValue)
+{
+	const TEffectInfo& Info = GetEffectInfo(Effect);
+	nValue = Utility::Clamp(nValue, Info.nMin, Info.nMax);
+
+	CTaskLockHolder TaskLock(m_TaskLock);
+	m_Lock.Acquire();
+	switch (Effect)
+	{
+		case TEffect::ReverbLevel:
+			m_bReverbActive = nValue > 0.0f;
+			m_EffectOverrides.bReverbActive = m_bReverbActive;
+			m_EffectOverrides.nReverbLevel  = nValue;
+			fluid_synth_reverb_on(m_pSynth, -1, m_bReverbActive);
+			fluid_synth_set_reverb_group_level(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ReverbRoomSize:
+			m_EffectOverrides.nReverbRoomSize = nValue;
+			fluid_synth_set_reverb_group_roomsize(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ReverbDamping:
+			m_EffectOverrides.nReverbDamping = nValue;
+			fluid_synth_set_reverb_group_damp(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ReverbWidth:
+			m_EffectOverrides.nReverbWidth = nValue;
+			fluid_synth_set_reverb_group_width(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ChorusLevel:
+			m_bChorusActive = nValue > 0.0f;
+			m_EffectOverrides.bChorusActive = m_bChorusActive;
+			m_EffectOverrides.nChorusLevel  = nValue;
+			fluid_synth_chorus_on(m_pSynth, -1, m_bChorusActive);
+			fluid_synth_set_chorus_group_level(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ChorusDepth:
+			m_EffectOverrides.nChorusDepth = nValue;
+			fluid_synth_set_chorus_group_depth(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ChorusSpeed:
+			m_EffectOverrides.nChorusSpeed = nValue;
+			fluid_synth_set_chorus_group_speed(m_pSynth, -1, nValue);
+			break;
+
+		case TEffect::ChorusVoices:
+			m_EffectOverrides.nChorusVoices = static_cast<int>(nValue + 0.5f);
+			fluid_synth_set_chorus_group_nr(m_pSynth, -1, m_EffectOverrides.nChorusVoices.Value());
+			break;
+
+		default:
+			break;
+	}
+	m_Lock.Release();
 }
 
 bool CSoundFontSynth::SwitchSoundFont(size_t nIndex)
@@ -369,6 +773,7 @@ bool CSoundFontSynth::SwitchSoundFont(size_t nIndex)
 	}
 
 	m_nCurrentSoundFontIndex = nIndex;
+	UpdateSoundFontName();
 
 	LOGNOTE("Loaded \"%s\"", m_SoundFontManager.GetSoundFontName(nIndex));
 	if (m_pUI)
@@ -381,10 +786,18 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 {
 	const CConfig* const pConfig = CConfig::Get();
 
+	CTaskLockHolder TaskLock(m_TaskLock);
 	m_Lock.Acquire();
 
 	if (m_pSynth)
 		delete_fluid_synth(m_pSynth);
+
+	delete[] m_pPresets;
+	m_pPresets            = nullptr;
+	m_nPresets            = 0;
+	m_nOutOfMemoryPresetIndex = 0;
+	m_nSoundFontID        = FLUID_FAILED;
+	m_nDefaultProgramMask = 0;
 
 	m_pSynth = new_fluid_synth(m_pSettings);
 
@@ -395,23 +808,40 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 		return false;
 	}
 
+	fluid_sfloader_t* pLoader = new_fluid_defsfloader(m_pSettings);
+	if (!pLoader)
+	{
+		m_Lock.Release();
+		LOGERR("Failed to create SoundFont loader");
+		return false;
+	}
+
+	fluid_sfloader_set_callbacks(pLoader, SoundFontOpen, SoundFontRead, SoundFontSeek, SoundFontTell, SoundFontClose);
+	fluid_synth_add_sfloader(m_pSynth, pLoader);
+
 	fluid_synth_set_polyphony(m_pSynth, pConfig->FluidSynthPolyphony);
 
 	m_nInitialGain = pFXProfile->nGain.ValueOr(pConfig->FluidSynthDefaultGain);
 	fluid_synth_set_gain(m_pSynth, m_nVolume / 100.0f * m_nInitialGain);
 
-	// Use values from effects profile if set, otherwise use defaults
-	fluid_synth_reverb_on(m_pSynth, -1, pFXProfile->bReverbActive.ValueOr(pConfig->FluidSynthDefaultReverbActive));
-	fluid_synth_set_reverb_group_damp(m_pSynth, -1, pFXProfile->nReverbDamping.ValueOr(pConfig->FluidSynthDefaultReverbDamping));
-	fluid_synth_set_reverb_group_level(m_pSynth, -1, pFXProfile->nReverbLevel.ValueOr(pConfig->FluidSynthDefaultReverbLevel));
-	fluid_synth_set_reverb_group_roomsize(m_pSynth, -1, pFXProfile->nReverbRoomSize.ValueOr(pConfig->FluidSynthDefaultReverbRoomSize));
-	fluid_synth_set_reverb_group_width(m_pSynth, -1, pFXProfile->nReverbWidth.ValueOr(pConfig->FluidSynthDefaultReverbWidth));
+	// Use values changed at runtime if set, then values from effects profile if set, otherwise use defaults
+	#define FX_VALUE(MEMBER, DEFAULT) (m_EffectOverrides.MEMBER ? m_EffectOverrides.MEMBER.Value() : pFXProfile->MEMBER.ValueOr(pConfig->DEFAULT))
 
-	fluid_synth_chorus_on(m_pSynth, -1, pFXProfile->bChorusActive.ValueOr(pConfig->FluidSynthDefaultChorusActive));
-	fluid_synth_set_chorus_group_depth(m_pSynth, -1, pFXProfile->nChorusDepth.ValueOr(pConfig->FluidSynthDefaultChorusDepth));
-	fluid_synth_set_chorus_group_level(m_pSynth, -1, pFXProfile->nChorusLevel.ValueOr(pConfig->FluidSynthDefaultChorusLevel));
-	fluid_synth_set_chorus_group_nr(m_pSynth, -1, pFXProfile->nChorusVoices.ValueOr(pConfig->FluidSynthDefaultChorusVoices));
-	fluid_synth_set_chorus_group_speed(m_pSynth, -1, pFXProfile->nChorusSpeed.ValueOr(pConfig->FluidSynthDefaultChorusSpeed));
+	m_bReverbActive = FX_VALUE(bReverbActive, FluidSynthDefaultReverbActive);
+	fluid_synth_reverb_on(m_pSynth, -1, m_bReverbActive);
+	fluid_synth_set_reverb_group_damp(m_pSynth, -1, FX_VALUE(nReverbDamping, FluidSynthDefaultReverbDamping));
+	fluid_synth_set_reverb_group_level(m_pSynth, -1, FX_VALUE(nReverbLevel, FluidSynthDefaultReverbLevel));
+	fluid_synth_set_reverb_group_roomsize(m_pSynth, -1, FX_VALUE(nReverbRoomSize, FluidSynthDefaultReverbRoomSize));
+	fluid_synth_set_reverb_group_width(m_pSynth, -1, FX_VALUE(nReverbWidth, FluidSynthDefaultReverbWidth));
+
+	m_bChorusActive = FX_VALUE(bChorusActive, FluidSynthDefaultChorusActive);
+	fluid_synth_chorus_on(m_pSynth, -1, m_bChorusActive);
+	fluid_synth_set_chorus_group_depth(m_pSynth, -1, FX_VALUE(nChorusDepth, FluidSynthDefaultChorusDepth));
+	fluid_synth_set_chorus_group_level(m_pSynth, -1, FX_VALUE(nChorusLevel, FluidSynthDefaultChorusLevel));
+	fluid_synth_set_chorus_group_nr(m_pSynth, -1, FX_VALUE(nChorusVoices, FluidSynthDefaultChorusVoices));
+	fluid_synth_set_chorus_group_speed(m_pSynth, -1, FX_VALUE(nChorusSpeed, FluidSynthDefaultChorusSpeed));
+
+	#undef FX_VALUE
 
 #ifndef NDEBUG
 	DumpFXSettings();
@@ -419,11 +849,31 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 
 	ResetMIDIMonitor();
 
-	m_Lock.Release();
-
 	const unsigned int nLoadStart = CTimer::GetClockTicks();
 
-	if (fluid_synth_sfload(m_pSynth, pSoundFontPath, true) == FLUID_FAILED)
+	// Don't select the default programs yet; with dynamic sample loading, that would read the default instruments
+	// of all 16 channels from the SD card (several hundred megabytes for a large piano). Each channel gets its
+	// default program on its first note instead, unless a program is selected before.
+	const int nSoundFontID = fluid_synth_sfload(m_pSynth, pSoundFontPath, false);
+
+	if (nSoundFontID != FLUID_FAILED)
+	{
+		m_nSoundFontID = nSoundFontID;
+
+		for (u8 nChannel = 0; nChannel < MIDIChannels; ++nChannel)
+		{
+			int nUnusedSoundFontID;
+			fluid_synth_get_program(m_pSynth, nChannel, &nUnusedSoundFontID, &m_DefaultBanks[nChannel], &m_DefaultPrograms[nChannel]);
+		}
+		m_nDefaultProgramMask = (1 << MIDIChannels) - 1;
+
+		BuildPresetList();
+		UpdateProgramName();
+	}
+
+	m_Lock.Release();
+
+	if (nSoundFontID == FLUID_FAILED)
 	{
 		LOGERR("Failed to load SoundFont");
 		return false;
@@ -433,6 +883,100 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 	LOGNOTE("\"%s\" loaded in %0.2f seconds", pSoundFontPath, nLoadTime);
 
 	return true;
+}
+
+void CSoundFontSynth::BuildPresetList()
+{
+	fluid_sfont_t* pSoundFont = fluid_synth_get_sfont_by_id(m_pSynth, m_nSoundFontID);
+	if (!pSoundFont)
+		return;
+
+	size_t nCount = 0;
+	fluid_sfont_iteration_start(pSoundFont);
+	while (fluid_preset_t* pPreset = fluid_sfont_iteration_next(pSoundFont))
+		if (fluid_preset_get_banknum(pPreset) < DrumBank)
+			++nCount;
+
+	m_pPresets = new TPreset[nCount];
+
+	// Sorted by program, then bank, so that variations follow their GM instrument
+	fluid_sfont_iteration_start(pSoundFont);
+	while (fluid_preset_t* pPreset = fluid_sfont_iteration_next(pSoundFont))
+	{
+		const int nBank = fluid_preset_get_banknum(pPreset);
+		if (nBank >= DrumBank)
+			continue;
+
+		const TPreset Preset = { static_cast<u16>(nBank), static_cast<u8>(fluid_preset_get_num(pPreset)) };
+
+		size_t i = m_nPresets++;
+		while (i > 0 && (m_pPresets[i - 1].nProgram > Preset.nProgram || (m_pPresets[i - 1].nProgram == Preset.nProgram && m_pPresets[i - 1].nBank > Preset.nBank)))
+		{
+			m_pPresets[i] = m_pPresets[i - 1];
+			--i;
+		}
+		m_pPresets[i] = Preset;
+	}
+}
+
+void CSoundFontSynth::LoadDefaultProgram(u8 nChannel)
+{
+	int nSoundFontID, nBank, nProgram;
+	fluid_synth_get_program(m_pSynth, nChannel, &nSoundFontID, &nBank, &nProgram);
+
+	if (nBank == m_DefaultBanks[nChannel])
+		fluid_synth_program_change(m_pSynth, nChannel, nProgram);
+
+	// A bank select without a program change doesn't change the instrument, but must apply to the next one
+	else if (fluid_synth_program_select(m_pSynth, nChannel, m_nSoundFontID, m_DefaultBanks[nChannel], m_DefaultPrograms[nChannel]) == FLUID_OK)
+		fluid_synth_bank_select(m_pSynth, nChannel, nBank);
+	else
+		fluid_synth_program_change(m_pSynth, nChannel, nProgram);
+
+	m_nDefaultProgramMask &= ~(1 << nChannel);
+
+	if (nChannel == 0)
+		UpdateProgramName();
+}
+
+void CSoundFontSynth::UpdateDefaultPrograms()
+{
+	// Resets select the default programs on all channels
+	for (u8 nChannel = 0; nChannel < MIDIChannels; ++nChannel)
+		if ((m_nDefaultProgramMask & (1 << nChannel)) && fluid_synth_get_channel_preset(m_pSynth, nChannel))
+			m_nDefaultProgramMask &= ~(1 << nChannel);
+
+	UpdateProgramName();
+}
+
+void CSoundFontSynth::UpdateProgramName()
+{
+	char ProgramName[sizeof(m_DisplayInfo.ProgramName)];
+	int nBank = 0, nProgram = 0;
+
+	fluid_preset_t* pPreset = fluid_synth_get_channel_preset(m_pSynth, 0);
+	if (pPreset)
+	{
+		nBank    = fluid_preset_get_banknum(pPreset);
+		nProgram = fluid_preset_get_num(pPreset);
+	}
+	else if (m_nDefaultProgramMask & 1)
+	{
+		// Default program that hasn't been loaded yet
+		nBank    = m_DefaultBanks[0];
+		nProgram = m_DefaultPrograms[0];
+
+		fluid_sfont_t* pSoundFont = fluid_synth_get_sfont_by_id(m_pSynth, m_nSoundFontID);
+		pPreset = pSoundFont ? fluid_sfont_get_preset(pSoundFont, nBank, nProgram) : nullptr;
+	}
+
+	snprintf(ProgramName, sizeof(ProgramName), "%s", pPreset ? fluid_preset_get_name(pPreset) : "");
+
+	m_DisplayInfoLock.Acquire();
+	memcpy(m_DisplayInfo.ProgramName, ProgramName, sizeof(ProgramName));
+	m_DisplayInfo.nBank    = nBank;
+	m_DisplayInfo.nProgram = nProgram;
+	m_DisplayInfoLock.Release();
 }
 
 void CSoundFontSynth::ResetMIDIMonitor()

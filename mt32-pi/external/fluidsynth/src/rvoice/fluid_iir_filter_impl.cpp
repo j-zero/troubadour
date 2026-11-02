@@ -13,19 +13,30 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
+#include "fluid_sys.h"
 #include "fluid_iir_filter.h"
 #include "fluid_conv.h"
 
 #include <algorithm>
 #include <cmath>
 
+/* Return the sin/cos table index used for coefficient lookup. */
+template<typename R>
+static inline signed fluid_iir_filter_sincos_index(R fres)
+{
+    signed tab_idx = (static_cast<signed>(fres) - FRES_MIN) / CENTS_STEP;
+#ifndef DBG_FILTER
+    fluid_clip(tab_idx, 0, SINCOS_TAB_SIZE - 1);
+#endif
+    return tab_idx;
+}
 
-// Calculating the sine and cosine coefficients for every possible cutoff frequency is too CPU expensive and can harm real-time playback.
+
+// Calculating the sine and cosine coefficients for every possible cutoff frequency is too CPU expensive and can harm realtime playback.
 // Therefore, we precalculate the coefficients with a precision of CENTS_STEP and store them in a table.
 extern "C" void fluid_iir_filter_init_table(fluid_iir_sincos_t *sincos_table, fluid_real_t sample_rate)
 {
@@ -62,10 +73,7 @@ static inline void fluid_iir_filter_calculate_coefficients(R fres,
      * into account for both significant frequency relocation and for
      * bandwidth readjustment'. */
 
-    signed tab_idx = (static_cast<signed>(fres) - FRES_MIN) / CENTS_STEP;
-#ifndef DBG_FILTER
-    fluid_clip(tab_idx, 0, SINCOS_TAB_SIZE - 1);
-#endif
+    signed tab_idx = fluid_iir_filter_sincos_index(fres);
     R sin_coeff = sincos_table[tab_idx].sin;
     R cos_coeff = sincos_table[tab_idx].cos;
     R alpha_coeff = sin_coeff / (2.0f * q);
@@ -154,13 +162,14 @@ static inline void fluid_iir_filter_calculate_coefficients(R fres,
  * - dsp_hist1: same
  * - dsp_hist2: same
  */
-template<bool GAIN_NORM, bool AMPLIFY, enum fluid_iir_filter_type TYPE>
+// Specialize the loop to remove the cache check when coefficient reuse is disabled.
+template<bool GAIN_NORM, bool AMPLIFY, enum fluid_iir_filter_type TYPE, bool REUSE_COEFFICIENTS>
 static void
-fluid_iir_filter_apply_local(fluid_iir_filter_t *iir_filter, fluid_real_t *dsp_buf, unsigned int count)
+fluid_iir_filter_apply_samples(fluid_iir_filter_t *iir_filter, fluid_real_t *FLUID_RESTRICT dsp_buf, unsigned int count)
 {
     // FLUID_IIR_Q_LINEAR may switch the filter off by setting Q==0
     // Due to the linear smoothing, last_q may not exactly become zero.
-    if (iir_filter->type == FLUID_IIR_DISABLED || FLUID_FABS(iir_filter->last_q) < Q_MIN)
+    if (iir_filter->type == FLUID_IIR_DISABLED || iir_filter->last_q < Q_MIN)
     {
         return;
     }
@@ -183,22 +192,13 @@ fluid_iir_filter_apply_local(fluid_iir_filter_t *iir_filter, fluid_real_t *dsp_b
         fluid_real_t dsp_amp_incr = iir_filter->amp_incr;
         IIR_COEFF_T fres = static_cast<IIR_COEFF_T>(iir_filter->last_fres);
         IIR_COEFF_T q = static_cast<IIR_COEFF_T>(iir_filter->last_q);
+        // Force coefficient calculation on the first smoothed update.
+        signed previous_table_index = -1;
         
         const IIR_COEFF_T fres_incr = static_cast<IIR_COEFF_T>(iir_filter->fres_incr);
         const IIR_COEFF_T q_incr = static_cast<IIR_COEFF_T>(iir_filter->q_incr);
 
         /* filter (implement the voice filter according to SoundFont standard) */
-
-        /* Check for denormal number (too close to zero). */
-        if (FLUID_FABS(dsp_hist1) < 1e-20f)
-        {
-            dsp_hist1 = 0.0f; /* FIXME JMG - Is this even needed? */
-        }
-
-        /* Two versions of the filter loop. One, while the filter is
-         * changing towards its new setting. The other, if the filter
-         * doesn't change.
-         */
 
         unsigned int dsp_i;
         for (dsp_i = 0; dsp_i < count; dsp_i++)
@@ -208,6 +208,14 @@ fluid_iir_filter_apply_local(fluid_iir_filter_t *iir_filter, fluid_real_t *dsp_b
             fluid_real_t sample = dsp_b02 * (dsp_centernode + dsp_hist2) + dsp_b1 * dsp_hist1;
             dsp_hist2 = dsp_hist1;
             dsp_hist1 = dsp_centernode;
+
+            FLUID_ASSERT(dsp_hist1 == dsp_hist1);
+            FLUID_ASSERT(sample == sample);
+            FLUID_ASSERT(dsp_a1 == dsp_a1);
+            FLUID_ASSERT(dsp_a2 == dsp_a2);
+            FLUID_ASSERT(dsp_b02 == dsp_b02);
+            FLUID_ASSERT(dsp_b1 == dsp_b1);
+            FLUID_ASSERT(q >= Q_MIN);
 
             /* Alternatively, it could be implemented in Transposed Direct Form II */
             // fluid_real_t dsp_input = dsp_buf[dsp_i];
@@ -236,26 +244,66 @@ fluid_iir_filter_apply_local(fluid_iir_filter_t *iir_filter, fluid_real_t *dsp_b
                 {
                     --q_incr_count;
                     q += q_incr;
+                    if(q < Q_MIN)
+                    {
+                        LOG_FILTER("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                        LOG_FILTER("!!!OOPS!!! limited Q to its minimum value, was: %f", q);
+                        LOG_FILTER("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                        q_incr_count = 0;
+                        q = Q_MIN;
+                    }
                 }
+
+                LOG_FILTER("fres: %.2f Hz  | target_fres: %.2f Hz | fres_incr: %f\t| fres_incr_count: %d\t|---| q: %f\t| target_q: %f\t| q_incr: %f\t| q_incr_count: %d", fres, iir_filter->target_fres, fres_incr, fres_incr_count, q, iir_filter->target_q, q_incr, q_incr_count);
                 
-                LOG_FILTER("last_fres: %.2f Hz  |  target_fres: %.2f Hz  |---|  last_q: %.4f  |  target_q: %.4f", iir_filter->last_fres, iir_filter->target_fres, iir_filter->last_q, iir_filter->target_q);
-                
-                fluid_iir_filter_calculate_coefficients<IIR_COEFF_T, GAIN_NORM, TYPE>(fres, q, iir_filter->sincos_table, &dsp_a1, &dsp_a2, &dsp_b02, &dsp_b1);
+                // Reuse is safe only while Q and the cutoff table entry are unchanged.
+                const signed table_index = REUSE_COEFFICIENTS ? fluid_iir_filter_sincos_index(fres) : -1;
+                if(!REUSE_COEFFICIENTS || table_index != previous_table_index)
+                {
+                    fluid_iir_filter_calculate_coefficients<IIR_COEFF_T, GAIN_NORM, TYPE>(fres, q, iir_filter->sincos_table, &dsp_a1, &dsp_a2, &dsp_b02, &dsp_b1);
+                    previous_table_index = table_index;
+                }
             }
         }
 
-        iir_filter->hist1 = dsp_hist1;
-        iir_filter->hist2 = dsp_hist2;
         iir_filter->a1 = dsp_a1;
         iir_filter->a2 = dsp_a2;
         iir_filter->b02= dsp_b02;
         iir_filter->b1 = dsp_b1;
+
+        /* Check for denormal number (too close to zero). */
+        if (FLUID_FABS(dsp_hist1) < 1e-20f)
+        {
+            dsp_hist1 = 0.0f;
+        }
+        if (FLUID_FABS(dsp_hist2) < 1e-20f)
+        {
+            dsp_hist2 = 0.0f;
+        }
+        iir_filter->hist1 = dsp_hist1;
+        iir_filter->hist2 = dsp_hist2;
 
         iir_filter->last_fres = fres;
         iir_filter->fres_incr_count = fres_incr_count;
         iir_filter->last_q = q;
         iir_filter->q_incr_count = q_incr_count;
         iir_filter->amp = dsp_amp;
+    }
+}
+
+/* Reuse only for fixed-Q ramps whose per-sample cutoff change is below one table step. */
+template<bool GAIN_NORM, bool AMPLIFY, enum fluid_iir_filter_type TYPE>
+static void
+fluid_iir_filter_apply_local(fluid_iir_filter_t *iir_filter, fluid_real_t *FLUID_RESTRICT dsp_buf, unsigned int count)
+{
+    if(iir_filter->q_incr_count <= 0 && iir_filter->fres_incr_count > 1
+            && std::abs(static_cast<IIR_COEFF_T>(iir_filter->fres_incr)) < CENTS_STEP)
+    {
+        fluid_iir_filter_apply_samples<GAIN_NORM, AMPLIFY, TYPE, true>(iir_filter, dsp_buf, count);
+    }
+    else
+    {
+        fluid_iir_filter_apply_samples<GAIN_NORM, AMPLIFY, TYPE, false>(iir_filter, dsp_buf, count);
     }
 }
 
@@ -292,10 +340,10 @@ extern "C" void fluid_iir_filter_apply(fluid_iir_filter_t *resonant_filter,
 }
 
 void fluid_iir_filter_calc(fluid_iir_filter_t *iir_filter,
-                           fluid_real_t output_rate,
+                           fluid_real_t max_fres_ct,
                            fluid_real_t fres_mod)
 {
-    unsigned int calc_coeff_flag = FALSE;
+    bool calc_coeff_flag = false;
     fluid_real_t fres, fres_diff;
     
     if(iir_filter->type == FLUID_IIR_DISABLED)
@@ -303,10 +351,11 @@ void fluid_iir_filter_calc(fluid_iir_filter_t *iir_filter,
         return;
     }
 
-    /* calculate the frequency of the resonant filter in Hz */
-    fres = fluid_ct2hz(iir_filter->fres + fres_mod);
-
-    /* I removed the optimization of turning the filter off when the
+    /* Calculate the filter cutoff in absolute cents and clip it.
+     * The upper bound (max_fres_ct) was precomputed as fluid_hz2ct(0.45 * output_rate)
+     * so that the expensive hz<->cents round-trip for clipping fres is avoided on every voice render call.
+     *
+     * I removed the optimization of turning the filter off when the
      * resonance frequency is above the maximum frequency. Instead, the
      * filter frequency is set to a maximum of 0.45 times the sampling
      * rate. For a 44100 kHz sampling rate, this amounts to 19845
@@ -316,29 +365,29 @@ void fluid_iir_filter_calc(fluid_iir_filter_t *iir_filter,
      * clipping the maximum filter frequency at 0.45*srate, the filter
      * is used as an anti-aliasing filter. */
 
-    if(fres > 0.45f * output_rate)
+    static const fluid_real_t min_fres_ct = fluid_hz2ct(5.f);
+    fres = iir_filter->fres + fres_mod;
+    if(fres > max_fres_ct)
     {
-        fres = 0.45f * output_rate;
+        fres = max_fres_ct;
     }
-    else if(fres < 5.f)
+    else if(fres < min_fres_ct)
     {
-        fres = 5.f;
+        fres = min_fres_ct;
     }
 
-    LOG_FILTER("%f + %f = %f cents = %f Hz | Q: %f", iir_filter->fres, fres_mod, iir_filter->fres + fres_mod, fres, iir_filter->last_q);
-    
-    fres = fluid_hz2ct(fres);
+    LOG_FILTER("%f + %f = %f cents | Q: %f", iir_filter->fres, fres_mod, fres, iir_filter->last_q);
     
     /* if filter enabled and there is a significant frequency change.. */
     fres_diff = fres - iir_filter->last_fres;
     if(iir_filter->filter_startup)
     {
         // The filter was just starting up, make sure to calculate initial coefficients for the initial Q value, even though the fres may not have changed
-        calc_coeff_flag = TRUE;
+        calc_coeff_flag = true;
         
         iir_filter->fres_incr_count = 0;
         iir_filter->last_fres = fres;
-        iir_filter->filter_startup = (FLUID_FABS(iir_filter->last_q) < Q_MIN); // filter coefficients will not be initialized when Q is small
+        iir_filter->filter_startup = (iir_filter->last_q < Q_MIN); // filter coefficients will not be initialized when Q is small
     }
     else if(FLUID_FABS(fres_diff) > (fluid_real_t)CENTS_STEP) // only smooth out fres when difference is "significant"
     {
@@ -357,13 +406,17 @@ void fluid_iir_filter_calc(fluid_iir_filter_t *iir_filter,
 #endif
 
         // The filter coefficients have to be recalculated (filter cutoff has changed).
-        calc_coeff_flag = TRUE;
+        calc_coeff_flag = true;
     }
     else
     {
+        fluid_real_t last_fres = iir_filter->last_fres;
         // difference in fres is small, so set it directly
-        iir_filter->fres_incr_count = 0;
         iir_filter->last_fres = fres;
+        // disable fres interpolation
+        iir_filter->fres_incr_count = 0;
+        // Filter cutoff has changed, so don't forget to recalculate the coefficients! #1679
+        calc_coeff_flag = last_fres != fres;
         // We do not account for any change of Q here - if it was changed q_incro_count will be non-zero and recalculating the coeffs
         // will be taken care of in fluid_iir_filter_apply().
     }

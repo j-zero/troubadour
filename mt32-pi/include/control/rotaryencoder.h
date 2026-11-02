@@ -51,13 +51,11 @@ private:
 	TEncoderType m_Type;
 	bool m_bReversed;
 
-	s8 m_nDelta;
+	volatile s8 m_nDelta;
 	u8 m_nState;
 
 	// Bitmask of which valid 4-bit transition codes we have seen in each direction (CW and CCW)
 	u16 nPreviousTransitions[2];
-
-	unsigned int m_nLastReadTime;
 };
 
 #endif

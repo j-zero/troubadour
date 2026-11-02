@@ -111,19 +111,7 @@ void CMisterControl::ApplyConfig(const TMisterStatus& NewStatus, const TMisterSt
 {
 	TEvent Event;
 
-	if (NewStatus.Synth != CurrentStatus.Synth)
-	{
-		Event.Type = TEventType::SwitchSynth;
-		Event.SwitchSynth.Synth = NewStatus.Synth == TMisterSynth::MT32 ? TSynth::MT32 : TSynth::SoundFont;
-		m_pEventQueue->Enqueue(Event);
-	}
-
-	if (NewStatus.MT32ROMSet != CurrentStatus.MT32ROMSet)
-	{
-		Event.Type = TEventType::SwitchMT32ROMSet;
-		Event.SwitchMT32ROMSet.ROMSet = static_cast<TMT32ROMSet>(NewStatus.MT32ROMSet);
-		m_pEventQueue->Enqueue(Event);
-	}
+	// Only SoundFont mode is available; the synth and MT-32 ROM set selections are ignored
 
 	if (NewStatus.SoundFontIndex != CurrentStatus.SoundFontIndex)
 	{

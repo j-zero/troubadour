@@ -23,13 +23,17 @@
 #ifndef _ui_h
 #define _ui_h
 
+#include <circle/spinlock.h>
 #include <circle/types.h>
 
-#include "lcd/barchars.h"
-#include "lcd/lcd.h"
+#include "lcd/canvas.h"
+#include "lcd/images.h"
 
-class CSynthBase;
+class CGC9A01;
+class CSoundFontSynth;
 
+// User interface on the round colour display. Messages and menus are set from the main task on core 0; the
+// screen is drawn by the UI task on core 1.
 class CUserInterface
 {
 public:
@@ -39,11 +43,54 @@ public:
 		Yamaha,
 	};
 
+	enum class TMessageType
+	{
+		Notice,
+		Warning,
+		Error,
+	};
+
+	struct TMenu
+	{
+		enum class TType
+		{
+			List,
+			Parameter,
+		};
+
+		// Lists show the selected item in the middle row
+		static constexpr size_t ListRows = 5;
+		static constexpr size_t SelectedRow = ListRows / 2;
+		static constexpr size_t TextLength = 48;
+
+		TType Type;
+		char Title[TextLength];
+
+		// List: items around the selection; empty rows are left blank
+		char Rows[ListRows][TextLength];
+		int nCurrentRow;	// Row of the item that is in use, which is highlighted; -1 for none
+
+		// Parameter: value with a gauge
+		char Value[TextLength];
+		float nFraction;
+		u8 nPage;
+		u8 nPages;
+	};
+
 	CUserInterface();
+	~CUserInterface();
 
-	void Update(CLCD& LCD, CSynthBase& Synth, unsigned int nTicks);
+	CUserInterface(const CUserInterface&) = delete;
+	CUserInterface& operator=(const CUserInterface&) = delete;
 
-	void ShowSystemMessage(const char* pMessage, bool bSpinner = false);
+	// Drawn by the UI task
+	void Update(CGC9A01& Display, CSoundFontSynth& Synth, unsigned int nTicks);
+
+	// Drawn immediately; only before the UI task has started, or after it has stopped
+	void ShowStartup(CGC9A01& Display, const char* pVersion, const char* pStatus);
+	void ShowPanic(CGC9A01& Display, const char* pMessage);
+
+	void ShowSystemMessage(const char* pMessage, bool bSpinner = false, TMessageType Type = TMessageType::Notice);
 	void ClearSpinnerMessage();
 	void DisplayImage(TImage Image);
 	void ShowSysExText(TSysExDisplayMessage Type, const u8* pMessage, size_t nSize, u8 nOffset);
@@ -51,10 +98,11 @@ public:
 	void EnterPowerSavingMode();
 	void ExitPowerSavingMode();
 
-	bool IsScrolling() const { return m_bIsScrolling; }
+	// Shown until hidden or replaced by a message
+	void ShowMenu(const TMenu& Menu);
+	void HideMenu();
 
-	static u8 CenterMessageOffset(CLCD& LCD, const char* pMessage);
-	static void DrawChannelLevels(CLCD& LCD, u8 nBarHeight, float* pChannelLevels, float* pPeakLevels, u8 nChannels, bool bDrawBarBases);
+	void SetVolume(u8 nVolume) { m_nVolume = nVolume; }
 
 private:
 	enum class TState
@@ -65,37 +113,43 @@ private:
 		DisplayingImage,
 		DisplayingSysExText,
 		DisplayingSysExBitmap,
+		DisplayingMenu,
 		EnteringPowerSavingMode,
 		InPowerSavingMode
 	};
 
-	bool UpdateScroll(CLCD& LCD, unsigned int nTicks);
-	bool DrawSystemState(CLCD& LCD) const;
-	void DrawSysExText(CLCD& LCD, u8 nFirstRow) const;
-	void DrawSysExBitmap(CLCD& LCD, u8 nFirstRow, u8 nRows) const;
-
-	static void DrawChannelLevelsCharacter(CLCD& LCD, u8 nRows, u8 nBarOffsetX, u8 nBarYOffset, u8 nBarSpacing, const float* pChannelLevels, u8 nChannels, bool bDrawBarBases);
-	static void DrawChannelLevelsGraphical(CLCD& LCD, u8 nBarOffsetX, u8 nBarYOffset, u8 nBarWidth, u8 nBarHeight, u8 nBarSpacing, const float* pChannelLevels, const float* pPeakLevels, u8 nChannels, bool bDrawBarBases);
+	void DrawHome(CSoundFontSynth& Synth, unsigned int nTicks);
+	void DrawChannelLevels(const float* pLevels, const float* pPeaks, int nY1, int nY2);
+	void DrawGauge(int nInnerRadius, int nOuterRadius, float nFraction, CCanvas::TColor Color);
+	void DrawMessage(const char* pMessage, CCanvas::TColor Color, bool bSpinner, unsigned int nTicks);
+	void DrawWrappedText(const TUIFont& Font, const char* pText, int nCenterY, CCanvas::TColor Color, size_t nMaxLines, int nRadius = CCanvas::TextRadius);
+	void DrawMenu(const TMenu& Menu, unsigned int nTicks);
+	void DrawScrollingText(const TUIFont& Font, const char* pText, int nY, CCanvas::TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth = -1);
+	void DrawSysExBitmap();
 
 	static constexpr size_t SystemMessageTextBufferSize = 256;
 	static constexpr size_t SyxExTextBufferSize = 32 + 1;
 	static constexpr size_t SysExPixelBufferSize = 64;
 
 	static constexpr unsigned SystemMessageDisplayTimeMillis = 3000;
-	static constexpr unsigned SystemMessageSpinnerTimeMillis = 32;
 	static constexpr unsigned SC55DisplayTimeMillis = 3000;
 
+	CCanvas* m_pCanvas;
+
 	// UI state
-	TState m_State;
+	volatile TState m_State;
 	unsigned m_nStateTime;
-	bool m_bIsScrolling;
-	size_t m_nCurrentScrollOffset;
-	size_t m_nCurrentSpinnerChar;
 	TImage m_CurrentImage;
+	volatile u8 m_nVolume;
+
+	// Text set from another core
+	CSpinLock m_Lock;
 	char m_SystemMessageTextBuffer[SystemMessageTextBufferSize];
+	TMessageType m_SystemMessageType;
 	TSysExDisplayMessage m_SysExDisplayMessageType;
 	char m_SysExTextBuffer[SyxExTextBufferSize];
 	u8 m_SysExPixelBuffer[SysExPixelBufferSize];
+	TMenu m_Menu;
 };
 
 #endif

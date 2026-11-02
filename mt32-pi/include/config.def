@@ -37,7 +37,6 @@
 
 BEGIN_SECTION(system)
 CFG(verbose,			bool,				SystemVerbose,				false						)
-CFG(default_synth,		TSystemDefaultSynth,		SystemDefaultSynth,			TSystemDefaultSynth::MT32			)
 CFG(usb,			bool,				SystemUSB,				true						)
 CFG(i2c_baud_rate,		int,				SystemI2CBaudRate,			400000						)
 CFG(power_save_timeout,		int,				SystemPowerSaveTimeout,			300						)
@@ -60,22 +59,18 @@ BEGIN_SECTION(control)
 CFG(scheme,			TControlScheme,			ControlScheme,				TControlScheme::None				)
 CFG(encoder_type,		TEncoderType,			ControlEncoderType,			TEncoderType::Full				)
 CFG(encoder_reversed,		bool,				ControlEncoderReversed,			false						)
+CFG(encoder2_clk_pin,		int,				ControlEncoder2CLKPin,			12						)
+CFG(encoder2_dat_pin,		int,				ControlEncoder2DATPin,			16						)
+CFG(encoder2_button_pin,	int,				ControlEncoder2ButtonPin,		26						)
+CFG(encoder2_reversed,		bool,				ControlEncoder2Reversed,		false						)
 CFG(mister,			bool,				ControlMister,				false						)
 CFG(switch_timeout,		int,				ControlSwitchTimeout,			3						)
-END_SECTION
-
-BEGIN_SECTION(mt32emu)
-CFG(gain,			float,				MT32EmuGain,				1.0f						)
-CFG(reverb_gain,		float,				MT32EmuReverbGain,			1.0f						)
-CFG(resampler_quality,		TMT32EmuResamplerQuality,	MT32EmuResamplerQuality,		TMT32EmuResamplerQuality::Good			)
-CFG(midi_channels,		TMT32EmuMIDIChannels,		MT32EmuMIDIChannels,			TMT32EmuMIDIChannels::Standard			)
-CFG(rom_set,			TMT32EmuROMSet,			MT32EmuROMSet,				TMT32EmuROMSet::MT32Old				)
-CFG(reversed_stereo,		bool,				MT32EmuReversedStereo,			false						)
 END_SECTION
 
 BEGIN_SECTION(fluidsynth)
 CFG(soundfont,			int,				FluidSynthSoundFont,			0						)
 CFG(polyphony,			int,				FluidSynthPolyphony,			200						)
+CFG(dynamic_samples,		bool,				FluidSynthDynamicSamples,		true						)
 CFG(gain,			float,				FluidSynthDefaultGain,			0.2f						)
 CFG(reverb,			bool,				FluidSynthDefaultReverbActive,		true						)
 CFG(reverb_damping,		float,				FluidSynthDefaultReverbDamping,		0.0						)
@@ -91,11 +86,12 @@ END_SECTION
 
 BEGIN_SECTION(lcd)
 CFG(type,			TLCDType,			LCDType,				TLCDType::None					)
-CFG(width,			int,				LCDWidth,				20						)
-CFG(height,			int,				LCDHeight,				2						)
-CFG(i2c_lcd_address,		int,				LCDI2CLCDAddress,			0x3c,					true	)
 CFG(rotation,			TLCDRotation,			LCDRotation,				TLCDRotation::Normal				)
 CFG(mirror,			TLCDMirror,			LCDMirror,				TLCDMirror::Normal				)
+CFG(spi_dc_pin,			int,				LCDSPIDCPin,				25						)
+CFG(spi_reset_pin,		int,				LCDSPIResetPin,				5						)
+CFG(spi_backlight_pin,		int,				LCDSPIBacklightPin,			6						)
+CFG(spi_clock_speed,		int,				LCDSPIClockSpeed,			16000000					)
 END_SECTION
 
 BEGIN_SECTION(network)

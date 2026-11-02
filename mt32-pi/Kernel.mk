@@ -11,11 +11,10 @@ OBJS		:=	src/config.o \
 			src/control/simplebuttons.o \
 			src/control/simpleencoder.o \
 			src/kernel.o \
-			src/lcd/drivers/hd44780.o \
-			src/lcd/drivers/hd44780fourbit.o \
-			src/lcd/drivers/hd44780i2c.o \
-			src/lcd/drivers/sh1106.o \
-			src/lcd/drivers/ssd1306.o \
+			src/laststate.o \
+			src/lcd/canvas.o \
+			src/lcd/drivers/gc9a01.o \
+			src/lcd/fonts.o \
 			src/lcd/ui.o \
 			src/main.o \
 			src/midimonitor.o \
@@ -27,9 +26,7 @@ OBJS		:=	src/config.o \
 			src/net/udpmidi.o \
 			src/pisound.o \
 			src/power.o \
-			src/rommanager.o \
 			src/soundfontmanager.o \
-			src/synth/mt32synth.o \
 			src/synth/soundfontsynth.o \
 			src/zoneallocator.o
 
@@ -76,9 +73,6 @@ DEFINE		+=	-D HDMI_CONSOLE
 endif
 
 -include $(DEPS)
-
-INCLUDE		+=	-I $(MT32EMUBUILDDIR)/include
-EXTRALIBS	+=	$(MT32EMULIB)
 
 INCLUDE		+=	-I $(FLUIDSYNTHBUILDDIR)/include \
 			-I $(FLUIDSYNTHHOME)/include

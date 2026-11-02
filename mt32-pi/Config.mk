@@ -87,10 +87,6 @@ BOOT_FILES=$(BOOTHOME)/bcm2711-rpi-4-b.dtb \
 	   $(BOOTHOME)/start4.elf \
 	   $(BOOTHOME)/start.elf
 
-MT32EMUHOME=$(realpath external/munt/mt32emu)
-MT32EMUBUILDDIR=build-munt
-MT32EMULIB=$(MT32EMUBUILDDIR)/libmt32emu.a
-
 FLUIDSYNTHHOME=$(realpath external/fluidsynth)
 FLUIDSYNTHBUILDDIR=build-fluidsynth
 FLUIDSYNTHLIB=$(FLUIDSYNTHBUILDDIR)/src/libfluidsynth.a

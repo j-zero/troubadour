@@ -13,9 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 #include "fluid_rvoice.h"
@@ -293,9 +292,9 @@ fluid_rvoice_check_sample_sanity(fluid_rvoice_t *voice)
  * Synthesize a voice to a buffer.
  *
  * @param voice rvoice to synthesize
- * @param dsp_buf Audio buffer to synthesize to (#FLUID_BUFSIZE in length)
+ * @param dsp_buf Audio buffer to synthesize to (FLUID_BUFSIZE in length)
  * @return Count of samples written to dsp_buf. (-1 means voice is currently
- * quiet, 0 .. #FLUID_BUFSIZE-1 means voice finished.)
+ * quiet, 0 .. FLUID_BUFSIZE-1 means voice finished.)
  *
  * Panning, reverb and chorus are processed separately. The dsp interpolation
  * routine is in (fluid_rvoice_dsp.c).
@@ -305,7 +304,7 @@ fluid_rvoice_write(fluid_rvoice_t *voice, fluid_real_t *dsp_buf)
 {
     int ticks = voice->envlfo.ticks;
     int count, is_looping;
-    fluid_real_t modenv_val;
+    fluid_real_t modenv_val, fmod;
 
     /******************* sample sanity check **********/
 
@@ -379,7 +378,8 @@ fluid_rvoice_write(fluid_rvoice_t *voice, fluid_real_t *dsp_buf)
                             fluid_lfo_get_val(&voice->envlfo.modlfo) * voice->envlfo.modlfo_to_pitch
                             + fluid_lfo_get_val(&voice->envlfo.viblfo) * voice->envlfo.viblfo_to_pitch
                             + modenv_val * voice->envlfo.modenv_to_pitch)
-                            / voice->dsp.root_pitch_hz;
+                            / 
+                            voice->dsp.root_pitch_hz;
 
     /******************* portamento ****************/
     /* pitchoffset is updated if enabled.
@@ -441,17 +441,19 @@ fluid_rvoice_write(fluid_rvoice_t *voice, fluid_real_t *dsp_buf)
     // Applying the filter after applying the gain from the volEnv might cause audible clicks for when turning off
     // voices that are filtered by a high Q, see https://github.com/FluidSynth/fluidsynth/issues/1427
     //
-    // Note that at this point we are using voice->dsp.output_rate which is set to the synth's output rate, because
+    // Note that at this point we are using voice->dsp.max_filter_fres_ct which is precomputed from the synth's output rate, because
     // the filter will receive the interpolated waveform.
 
-    fluid_iir_filter_calc(&voice->resonant_filter, voice->dsp.output_rate,
-                          fluid_lfo_get_val(&voice->envlfo.modlfo) * voice->envlfo.modlfo_to_fc +
-                          modenv_val * voice->envlfo.modenv_to_fc);
+    fmod = fluid_lfo_get_val(&voice->envlfo.modlfo) * voice->envlfo.modlfo_to_fc + modenv_val * voice->envlfo.modenv_to_fc;
+    fluid_iir_filter_calc(&voice->resonant_filter, voice->dsp.max_filter_fres_ct, fmod);
 
     fluid_check_fpe("voice_write IIR coefficients");
 
-    /* additional custom filter - only uses the fixed modulator, no lfos... */
-    fluid_iir_filter_calc(&voice->resonant_custom_filter, voice->dsp.output_rate, 0);
+    /* additional custom filter */
+    fmod = voice->resonant_custom_filter.flags & FLUID_IIR_BEANLAND
+         ? (voice->dsp.pitch + voice->dsp.pitchoffset) - (voice->dsp.sample->origpitch * 100 + voice->dsp.sample->pitchadj)
+         : 0;
+    fluid_iir_filter_calc(&voice->resonant_custom_filter, voice->dsp.max_filter_fres_ct, fmod);
 
     fluid_check_fpe("voice_write IIR (custom) coefficients");
 
@@ -551,6 +553,10 @@ DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_reset)
     voice->envlfo.ticks = 0;
     voice->envlfo.noteoff_ticks = 0;
 
+    /* Force a proper buffer-amplitude-reinitialization by fluid_rvoice_buffers_check_bufnum() when the buffer mappings are set up for the
+     * new voice, so its onset ramp cannot inherit a previous voice's gain. */
+    voice->buffers.count = 0;
+
     /* legato initialization */
     voice->dsp.pitchoffset = 0.0;   /* portamento initialization */
     voice->dsp.pitchinc = 0.0;
@@ -570,6 +576,11 @@ DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_reset)
     /* Clear sample history in filter */
     fluid_iir_filter_reset(&voice->resonant_filter);
     fluid_iir_filter_reset(&voice->resonant_custom_filter);
+
+    /* Clear finished callback */
+    voice->finished_cb = NULL;
+    voice->finished_cb_voice = NULL;
+    voice->finished_cb_data = NULL;
 
     /* Force setting of the phase at the first DSP loop run
      * This cannot be done earlier, because it depends on modulators.
@@ -680,8 +691,7 @@ static FLUID_INLINE void fluid_rvoice_local_retrigger_attack(fluid_rvoice_t *voi
 /**
  * Used by legato Mode : multi_retrigger
  *  see fluid_synth_noteon_mono_legato_multi_retrigger()
- * @param voice the synthesis voice to be updated
-*/
+ */
 DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_multi_retrigger_attack)
 {
     fluid_rvoice_t *voice = obj;
@@ -736,15 +746,12 @@ DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_multi_retrigger_attack)
 
 /**
  * sets the portamento dsp parameters: dsp.pitchoffset, dsp.pitchinc
- * @param voice rvoice to set portamento.
- * @param countinc increment count number.
- * @param pitchoffset pitch offset to apply to voice dsp.pitch.
  *
  * Notes:
  * 1) To get continuous portamento between consecutive noteOn (n1,n2,n3...),
  *   pitchoffset is accumulated in current dsp pitchoffset.
  * 2) And to get constant portamento duration, dsp pitch increment is updated.
-*/
+ */
 DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_portamento)
 {
     fluid_rvoice_t *voice = obj;
@@ -767,7 +774,7 @@ DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_output_rate)
     fluid_rvoice_t *voice = obj;
     fluid_real_t value = param[0].real;
 
-    voice->dsp.output_rate = value;
+    voice->dsp.max_filter_fres_ct = fluid_hz2ct(0.45f * value);
 }
 
 DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_interp_method)
@@ -941,6 +948,16 @@ DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_voiceoff)
 
     fluid_adsr_env_set_section(&voice->envlfo.volenv, FLUID_VOICE_ENVFINISHED);
     fluid_adsr_env_set_section(&voice->envlfo.modenv, FLUID_VOICE_ENVFINISHED);
+}
+
+
+DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_finished_callback)
+{
+    fluid_rvoice_t *voice = obj;
+
+    voice->finished_cb = (fluid_voice_callback_t) param[0].ptr;
+    voice->finished_cb_voice = param[1].ptr;
+    voice->finished_cb_data = param[2].ptr;
 }
 
 

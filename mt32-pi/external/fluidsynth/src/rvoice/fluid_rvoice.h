@@ -13,9 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free
- * Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
+ * License along with this library; if not, see
+ * <https://www.gnu.org/licenses/>.
  */
 
 
@@ -111,8 +110,8 @@ struct _fluid_rvoice_dsp_t
     /* Stuff needed for phase calculations */
 
     fluid_real_t pitch;              /* the pitch in midicents */
-    fluid_real_t root_pitch_hz;
-    fluid_real_t output_rate;
+    fluid_real_t root_pitch_hz;      /* the base note of the note in hz */
+    fluid_real_t max_filter_fres_ct; /* the maximum IIR filter cutoff frequency in absolute cents (= fluid_hz2ct(0.45 * output_rate)) */
 
     /* Stuff needed for amplitude calculations */
 
@@ -154,9 +153,8 @@ struct _fluid_rvoice_buffers_t
     } bufs[FLUID_RVOICE_MAX_BUFS];
 };
 
-
 /*
- * Hard real-time parameters needed to synthesize a voice
+ * Hard realtime parameters needed to synthesize a voice
  */
 struct _fluid_rvoice_t
 {
@@ -165,6 +163,12 @@ struct _fluid_rvoice_t
     fluid_iir_filter_t resonant_filter; /* IIR resonant dsp filter */
     fluid_iir_filter_t resonant_custom_filter; /* optional custom/general-purpose IIR resonant filter */
     fluid_rvoice_buffers_t buffers;
+
+    /* Finished callback, invoked from the render thread when the rvoice
+     * finishes and is about to be removed from the mixer's active list. */
+    fluid_voice_callback_t finished_cb;
+    void *finished_cb_voice; /* fluid_voice_t* passed as first arg */
+    void *finished_cb_data;  /* user data passed as second arg */
 };
 
 
@@ -197,6 +201,7 @@ DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_loopstart);
 DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_loopend);
 DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_samplemode);
 DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_sample);
+DECLARE_FLUID_RVOICE_FUNCTION(fluid_rvoice_set_finished_callback);
 
 
 int fluid_rvoice_dsp_silence(fluid_rvoice_t *rvoice, fluid_real_t *FLUID_RESTRICT dsp_buf, int looping);

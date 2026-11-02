@@ -27,18 +27,12 @@
 #include <circle/types.h>
 
 #include "control/rotaryencoder.h"
-#include "lcd/drivers/ssd1306.h"
-#include "synth/mt32romset.h"
-#include "synth/mt32synth.h"
+#include "lcd/drivers/gc9a01.h"
 #include "utility.h"
 
 class CConfig
 {
 public:
-	#define ENUM_SYSTEMDEFAULTSYNTH(ENUM) \
-		ENUM(MT32, mt32)                  \
-		ENUM(SoundFont, soundfont)
-
 	#define ENUM_AUDIOOUTPUTDEVICE(ENUM) \
 		ENUM(PWM, pwm)                   \
 		ENUM(HDMI, hdmi)                 \
@@ -51,26 +45,18 @@ public:
 
 	using TEncoderType             = CRotaryEncoder::TEncoderType;
 
-	using TMT32EmuResamplerQuality = CMT32Synth::TResamplerQuality;
-	using TMT32EmuMIDIChannels     = CMT32Synth::TMIDIChannels;
-	using TMT32EmuROMSet           = TMT32ROMSet;
-
-	using TLCDRotation             = CSSD1306::TLCDRotation;
-	using TLCDMirror               = CSSD1306::TLCDMirror;
+	using TLCDRotation             = CGC9A01::TRotation;
+	using TLCDMirror               = CGC9A01::TMirror;
 
 	#define ENUM_LCDTYPE(ENUM)             \
 		ENUM(None, none)                   \
-		ENUM(HD44780FourBit, hd44780_4bit) \
-		ENUM(HD44780I2C, hd44780_i2c)      \
-		ENUM(SH1106I2C, sh1106_i2c)        \
-		ENUM(SSD1306I2C, ssd1306_i2c)
+		ENUM(GC9A01SPI, gc9a01_spi)
 
 	#define ENUM_NETWORKMODE(ENUM) \
 		ENUM(Off, off)             \
 		ENUM(Ethernet, ethernet)   \
 		ENUM(WiFi, wifi)
 
-	CONFIG_ENUM(TSystemDefaultSynth, ENUM_SYSTEMDEFAULTSYNTH);
 	CONFIG_ENUM(TAudioOutputDevice, ENUM_AUDIOOUTPUTDEVICE);
 	CONFIG_ENUM(TControlScheme, ENUM_CONTROLSCHEME);
 	CONFIG_ENUM(TLCDType, ENUM_LCDTYPE);
@@ -91,11 +77,7 @@ public:
 	static bool ParseOption(const char* pString, float* pOutFloat);
 	static bool ParseOption(const char *pString, CString* pOut);
 	static bool ParseOption(const char *pString, CIPAddress* pOut);
-	static bool ParseOption(const char* pString, TSystemDefaultSynth* pOut);
 	static bool ParseOption(const char* pString, TAudioOutputDevice* pOut);
-	static bool ParseOption(const char* pString, TMT32EmuResamplerQuality* pOut);
-	static bool ParseOption(const char* pString, TMT32EmuMIDIChannels* pOut);
-	static bool ParseOption(const char* pString, TMT32EmuROMSet* pOut);
 	static bool ParseOption(const char* pString, TLCDType* pOut);
 	static bool ParseOption(const char* pString, TControlScheme* pOut);
 	static bool ParseOption(const char* pString, TEncoderType* pOut);

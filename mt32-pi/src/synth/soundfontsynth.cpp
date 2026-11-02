@@ -586,6 +586,22 @@ bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nCha
 
 	m_Lock.Acquire();
 
+	// Nothing to do if all channels already have this instrument; reloading it could take seconds
+	bool bAlreadySet = true;
+	for (u8 nChannel = nFirstChannel; nChannel < nLastChannel && bAlreadySet; ++nChannel)
+	{
+		int nSoundFontID, nBank, nProgram;
+		fluid_synth_get_program(m_pSynth, nChannel, &nSoundFontID, &nBank, &nProgram);
+		bAlreadySet = fluid_synth_get_channel_preset(m_pSynth, nChannel) && nSoundFontID == m_nSoundFontID
+			      && nBank == Preset.nBank && nProgram == Preset.nProgram;
+	}
+
+	if (bAlreadySet)
+	{
+		m_Lock.Release();
+		return true;
+	}
+
 	// Release the samples of the current instrument first; otherwise, both instruments would have to fit into
 	// memory at the same time, as the channels still holding the old one keep its samples loaded
 	for (u8 nChannel = nFirstChannel; nChannel < nLastChannel; ++nChannel)

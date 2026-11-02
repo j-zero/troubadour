@@ -97,9 +97,9 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_nDeferredSoundFontSwitchIndex(0),
 	  m_nDeferredSoundFontSwitchTime(0),
 
-	  m_bDeferredProgramChangeFlag(false),
-	  m_nDeferredProgramChangeIndex(0),
-	  m_nDeferredProgramChangeTime(0),
+	  m_nFootswitchesDown(0),
+	  m_bFootswitchesBoth(false),
+	  m_bFootswitchRepeated(false),
 
 	  m_Menu(TMenu::None),
 	  m_nParameterPage(ParameterPageVolume),
@@ -462,10 +462,6 @@ void CMT32Pi::MainTask()
 				Awaken();
 			}
 		}
-
-		// Check for deferred instrument change
-		if (m_bDeferredProgramChangeFlag && (nTicks - m_nDeferredProgramChangeTime) >= MSEC2HZ(ProgramChangeDelayMillis))
-			ApplyProgramChange(m_nDeferredProgramChangeIndex);
 
 		// Close menus that aren't used anymore
 		if (m_Menu != TMenu::None && (nTicks - m_nMenuTime) >= MSEC2HZ(MenuTimeoutMillis))
@@ -988,20 +984,17 @@ void CMT32Pi::ProcessEventQueue()
 
 void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 {
+	if (Event.Button == TButton::Button1 || Event.Button == TButton::Button2)
+	{
+		ProcessFootswitchEvent(Event);
+		return;
+	}
+
 	if (!Event.bPressed)
 		return;
 
 	switch (Event.Button)
 	{
-		// Previous/next instrument for the first MIDI channels
-		case TButton::Button1:
-			DeferProgramChange(-1);
-			break;
-
-		case TButton::Button2:
-			DeferProgramChange(1);
-			break;
-
 		case TButton::Button3:
 		case TButton::Button4:
 			SetMasterVolume(m_nMasterVolume + (Event.Button == TButton::Button3 ? -1 : 1));
@@ -1014,11 +1007,7 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 				break;
 
 			if (m_Menu == TMenu::Instruments)
-			{
-				CloseMenu();
-				m_bDeferredProgramChangeFlag = false;
-				ApplyProgramChange(m_nMenuIndex);
-			}
+				SelectMenuInstrument();
 			else
 				OpenMenu(TMenu::Instruments);
 			break;
@@ -1058,19 +1047,57 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 	}
 }
 
+void CMT32Pi::ProcessFootswitchEvent(const TButtonEvent& Event)
+{
+	// Footswitches act when released, so that pressing both doesn't also move the selection
+	const u8 nMask = Event.Button == TButton::Button1 ? 0b01 : 0b10;
+	const int nDelta = Event.Button == TButton::Button1 ? -1 : 1;
+
+	if (Event.bRepeat)
+	{
+		// Holding a footswitch scrolls through the list
+		if (!m_bFootswitchesBoth)
+		{
+			m_bFootswitchRepeated = true;
+			MoveInstrumentSelection(nDelta);
+		}
+		return;
+	}
+
+	if (Event.bPressed)
+	{
+		m_nFootswitchesDown |= nMask;
+
+		// Both footswitches select the highlighted instrument
+		if (m_nFootswitchesDown == FootswitchMaskBoth && !m_bFootswitchesBoth)
+		{
+			m_bFootswitchesBoth = true;
+			if (m_Menu == TMenu::Instruments)
+				SelectMenuInstrument();
+			else
+				OpenMenu(TMenu::Instruments);
+		}
+		return;
+	}
+
+	m_nFootswitchesDown &= ~nMask;
+	if (!m_bFootswitchesBoth && !m_bFootswitchRepeated)
+		MoveInstrumentSelection(nDelta);
+
+	if (!m_nFootswitchesDown)
+		m_bFootswitchesBoth = m_bFootswitchRepeated = false;
+}
+
 void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
 {
 	if (Event.nEncoder == 0)
 	{
 		// Turning the first encoder browses the instruments
-		if (m_Menu != TMenu::Instruments)
-			OpenMenu(TMenu::Instruments);
-
-		const size_t nPresets = m_pSoundFontSynth->GetPresetCount();
-		if (nPresets)
-			m_nMenuIndex = (m_nMenuIndex + nPresets + Event.nDelta % static_cast<int>(nPresets)) % nPresets;
+		MoveInstrumentSelection(Event.nDelta);
+		return;
 	}
-	else if (m_Menu == TMenu::SoundFonts)
+
+	if (m_Menu == TMenu::SoundFonts)
 	{
 		const size_t nSoundFonts = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
 		if (nSoundFonts)
@@ -1104,10 +1131,7 @@ void CMT32Pi::OpenMenu(TMenu Menu)
 	m_nMenuTime = m_pTimer->GetTicks();
 
 	if (Menu == TMenu::Instruments)
-	{
-		m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(0);
-		m_nMenuIndex = m_bDeferredProgramChangeFlag ? m_nDeferredProgramChangeIndex : m_nMenuCurrentIndex;
-	}
+		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(0);
 	else if (Menu == TMenu::SoundFonts)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetSoundFontIndex();
 
@@ -1187,6 +1211,30 @@ void CMT32Pi::UpdateMenu()
 	m_UserInterface.ShowMenu(Menu);
 }
 
+void CMT32Pi::MoveInstrumentSelection(int nDelta)
+{
+	if (m_Menu != TMenu::Instruments)
+		OpenMenu(TMenu::Instruments);
+
+	const size_t nPresets = m_pSoundFontSynth->GetPresetCount();
+	if (!nPresets)
+	{
+		CloseMenu();
+		LCDLog(TLCDLogType::Error, "No instruments!");
+		return;
+	}
+
+	m_nMenuIndex = (m_nMenuIndex + nPresets + nDelta % static_cast<int>(nPresets)) % nPresets;
+	m_nMenuTime = m_pTimer->GetTicks();
+	UpdateMenu();
+}
+
+void CMT32Pi::SelectMenuInstrument()
+{
+	CloseMenu();
+	ApplyProgramChange(m_nMenuIndex);
+}
+
 void CMT32Pi::ChangeParameter(int nDelta)
 {
 	if (m_nParameterPage == ParameterPageVolume)
@@ -1211,8 +1259,6 @@ void CMT32Pi::SwitchSoundFont(size_t nIndex)
 {
 	LOGNOTE("Switching to SoundFont %d", nIndex);
 
-	// The pending instrument refers to the old SoundFont
-	m_bDeferredProgramChangeFlag = false;
 	if (m_pSoundFontSynth->SwitchSoundFont(nIndex))
 	{
 		m_LastState.SoundFontPath = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontPath(nIndex);
@@ -1238,33 +1284,8 @@ bool CMT32Pi::ApplyLastInstrument()
 	return m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels);
 }
 
-void CMT32Pi::DeferProgramChange(int nDelta)
-{
-	const size_t nPresets = m_pSoundFontSynth->GetPresetCount();
-	if (!nPresets)
-	{
-		LCDLog(TLCDLogType::Error, "No instruments!");
-		return;
-	}
-
-	CloseMenu();
-
-	size_t nIndex = m_bDeferredProgramChangeFlag ? m_nDeferredProgramChangeIndex : m_pSoundFontSynth->GetChannelPresetIndex(0);
-	nIndex = (nIndex + nPresets + nDelta) % nPresets;
-
-	char Name[32];
-	m_pSoundFontSynth->FormatPresetName(nIndex, Name, sizeof(Name));
-	LCDLog(TLCDLogType::Notice, "%s", Name);
-
-	m_nDeferredProgramChangeIndex = nIndex;
-	m_nDeferredProgramChangeTime  = CTimer::Get()->GetTicks();
-	m_bDeferredProgramChangeFlag  = true;
-}
-
 void CMT32Pi::ApplyProgramChange(size_t nIndex)
 {
-	m_bDeferredProgramChangeFlag = false;
-
 	bool bSamplesLoaded;
 	const bool bResult = m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels, &bSamplesLoaded);
 

@@ -87,10 +87,12 @@ private:
 
 	static constexpr size_t MIDIRxBufferSize = 2048;
 
-	// Buttons 1 and 2 select the instrument for these channels
+	// The instrument list sets the instrument for these channels
 	// (one channel per string for MIDI guitars such as the Fishman TriplePlay)
 	static constexpr u8 ButtonProgramChannels = 6;
-	static constexpr unsigned ProgramChangeDelayMillis = 500;
+
+	// Footswitches (buttons 1 and 2): each one moves through the instrument list, both together select
+	static constexpr u8 FootswitchMaskBoth = 0b11;
 
 	// Settings are saved once they haven't changed for this long, so that turning the encoder doesn't write each step
 	static constexpr unsigned LastStateSaveDelayMillis = 2000;
@@ -152,17 +154,19 @@ private:
 
 	void ProcessEventQueue();
 	void ProcessButtonEvent(const TButtonEvent& Event);
+	void ProcessFootswitchEvent(const TButtonEvent& Event);
 	void ProcessEncoderEvent(const TEncoderEvent& Event);
 
 	// Menus
 	void OpenMenu(TMenu Menu);
 	void CloseMenu();
 	void UpdateMenu();
+	void MoveInstrumentSelection(int nDelta);
+	void SelectMenuInstrument();
 	void ChangeParameter(int nDelta);
 	// Actions that can be triggered via events
 	void SwitchSoundFont(size_t nIndex);
 	void DeferSwitchSoundFont(size_t nIndex);
-	void DeferProgramChange(int nDelta);
 	void ApplyProgramChange(size_t nIndex);
 	bool ApplyLastInstrument();
 	void SetMasterVolume(s32 nVolume);
@@ -216,10 +220,11 @@ private:
 	size_t m_nDeferredSoundFontSwitchIndex;
 	unsigned m_nDeferredSoundFontSwitchTime;
 
-	// Deferred instrument change, so that browsing through instruments doesn't load each of them
-	bool m_bDeferredProgramChangeFlag;
-	size_t m_nDeferredProgramChangeIndex;
-	unsigned m_nDeferredProgramChangeTime;
+	// Footswitches that are held down (bit 0: button 1, bit 1: button 2); a press of both or a held footswitch
+	// doesn't also move the selection when released
+	u8 m_nFootswitchesDown;
+	bool m_bFootswitchesBoth;
+	bool m_bFootswitchRepeated;
 
 	// Current menu and its selection
 	TMenu m_Menu;

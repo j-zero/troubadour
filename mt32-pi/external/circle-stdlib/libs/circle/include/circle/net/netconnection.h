@@ -2,7 +2,7 @@
 // netconnection.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2015-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2015-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@
 
 #include <circle/net/netconfig.h>
 #include <circle/net/networklayer.h>
+#include <circle/net/netbuffer.h>
 #include <circle/net/ipaddress.h>
 #include <circle/net/icmphandler.h>
 #include <circle/net/checksumcalculator.h>
@@ -46,6 +47,7 @@ public:
 	u16 GetForeignPort (void) const;
 	u16 GetOwnPort (void) const;
 	int GetProtocol (void) const;
+	u16 GetMSS (void) const;
 
 	// returns: string representation for current connection state
 	virtual const char *GetStateName (void) const;
@@ -54,14 +56,20 @@ public:
 	virtual int Accept (CIPAddress *pForeignIP, u16 *pForeignPort) = 0;
 	virtual int Close (void) = 0;
 	
-	virtual int Send (const void *pData, unsigned nLength, int nFlags) = 0;
-	virtual int Receive (void *pBuffer, int nFlags) = 0;
+	virtual int Send (CNetBuffer *pData, int nFlags) = 0;
+	virtual int Receive (CNetBuffer **ppBuffer, int nFlags) = 0;
 
-	virtual int SendTo (const void *pData, unsigned nLength, int nFlags,
+	virtual int SendTo (CNetBuffer *pData, int nFlags,
 			    const CIPAddress &rForeignIP, u16 nForeignPort) = 0;
-	virtual int ReceiveFrom (void *pBuffer, int nFlags, CIPAddress *pForeignIP, u16 *pForeignPort) = 0;
+	virtual int ReceiveFrom (CNetBuffer **ppBuffer, int nFlags, CIPAddress *pForeignIP, u16 *pForeignPort) = 0;
+
+	virtual int SetOptionReceiveTimeout (unsigned nMicroSeconds) = 0;
+	virtual int SetOptionSendTimeout (unsigned nMicroSeconds) = 0;
 
 	virtual int SetOptionBroadcast (boolean bAllowed) = 0;
+
+	virtual int SetOptionAddMembership (const CIPAddress &rGroupAddress) = 0;
+	virtual int SetOptionDropMembership (const CIPAddress &rGroupAddress) = 0;
 
 	virtual boolean IsConnected (void) const = 0;
 	virtual boolean IsTerminated (void) const = 0;
@@ -69,7 +77,7 @@ public:
 	virtual void Process (void) = 0;
 
 	// returns: -1: invalid packet, 0: not to me, 1: packet consumed
-	virtual int PacketReceived (const void *pPacket, unsigned nLength,
+	virtual int PacketReceived (CNetBuffer *pPacket,
 				    CIPAddress &rSenderIP, CIPAddress &rReceiverIP, int nProtocol) = 0;
 
 	// returns: 0: not to me, 1: notification consumed
@@ -77,6 +85,15 @@ public:
 					  CIPAddress &rSenderIP, CIPAddress &rReceiverIP,
 					  u16 nSendPort, u16 nReceivePort,
 					  int nProtocol) = 0;
+
+	struct TStatus
+	{
+		boolean bConnected;	///< Is connected
+		boolean bRxReady;	///< Ready to receive without blocking, or shutdown from peer
+		boolean bTxReady;	///< Ready to transmit without blocking
+		boolean bException;	///< Exception arrived (always FALSE)
+	};
+	virtual TStatus GetStatus (void) const = 0;
 
 protected:
 	CNetConfig    *m_pNetConfig;
@@ -86,6 +103,7 @@ protected:
 	u16 m_nForeignPort;
 	u16 m_nOwnPort;
 	int m_nProtocol;
+	u16 m_nMSS;
 
 	CChecksumCalculator m_Checksum;
 };

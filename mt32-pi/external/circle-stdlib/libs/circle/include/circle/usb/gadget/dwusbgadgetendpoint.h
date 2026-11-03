@@ -2,7 +2,7 @@
 // dwusbgadgetendpoint.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2023  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2023-2025  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -51,6 +51,10 @@ public:
 	/// \note Override this to start first transfer.
 	virtual void OnActivate (void) = 0;
 
+	/// \brief Called to deactivate/stop EP processing.
+	/// \note Override this to stop first transfer.
+	virtual void OnDeactivate (void) = 0;
+
 	/// \brief Called, when the current transfer completes.
 	/// \param bIn Was it an IN transfer?
 	/// \param nLength Number of transferred bytes
@@ -60,6 +64,10 @@ public:
 	/// \brief Device connection has been suspended / removed
 	/// \note Override this to abort pending transfers.
 	virtual void OnSuspend (void) {}
+
+	/// \brief Set the maximum packet size of this EP (e.g. after speed negotiation)
+	/// \param nMaxPacketSize New maximum packet size in bytes
+	void SetMaxPacketSize (size_t nMaxPacketSize);
 
 protected:
 	/// \return Endpoint number (0-15)
@@ -110,6 +118,15 @@ protected:
 	/// \note pBuffer may be nullptr and nLength zero to transfer empty packets.
 	/// \note The buffer must be declared as DMA_BUFFER
 	void BeginTransfer (TTransferMode Mode, void *pBuffer, size_t nLength);
+
+	/// \brief Cancel a began transfer
+	void CancelTransfer (void);
+
+	/// \return Is a transfer currently armed / in flight on this EP?
+	boolean IsTransferActive (void) const
+	{
+		return m_TransferMode != TransferUnknown;
+	}
 
 	/// \brief Send STALL response
 	/// \param bIn STALL next IN request, or OUT otherwise?

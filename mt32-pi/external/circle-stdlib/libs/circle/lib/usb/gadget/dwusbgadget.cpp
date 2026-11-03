@@ -5,7 +5,7 @@
 //	Does only support Control EP0 and Bulk EPs.
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2023-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2023-2026  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -77,6 +77,7 @@ boolean CDWUSBGadget::Initialize (boolean bScanDevices)
 	    && Model != MachineModelZero
 	    && Model != MachineModelZeroW
 	    && Model != MachineModelZero2W
+	    && Model != MachineModelCM0
 	    && Model != MachineModel3APlus
 	    && Model != MachineModel4B
 	    && Model != MachineModel400)
@@ -506,14 +507,29 @@ void CDWUSBGadget::HandleUSBSuspend (void)
 	LOGDBG ("USB suspend");
 #endif
 
-	m_bPnPEvent[PnPEventSuspend] = TRUE;
+	// Trace: always log suspend with current state (diagnosis for issue #591)
+	LOGTRACE ("USB suspend (state %u)", (unsigned) m_State);
 
-	for (unsigned i = 0; i <= NumberOfEPs; i++)
+	if (   m_State != StatePowered
+	    && m_State != StateSuspended)
 	{
-		if (m_pEP[i])
+		// Do NOT tear down the core or disable interrupts here. Treating a
+		// bus suspend as a disconnect (PnP event -> EP teardown and full core
+		// re-init in UpdatePlugAndPlay) leaves the device deaf for >100 ms.
+		// A host, which resets and enumerates during that window (e.g. a PC
+		// BIOS on warm reboot), then talks to a device, whose hardware ACKs,
+		// but whose software never sees ENUMDONE or SETUP interrupts. Only
+		// abort the in-flight transfers and wait for the next USB reset,
+		// which re-initializes the EPs at IRQ level.
+		for (unsigned i = 0; i <= NumberOfEPs; i++)
 		{
-			m_pEP[i]->OnSuspend ();
+			if (m_pEP[i])
+			{
+				m_pEP[i]->OnSuspend ();
+			}
 		}
+
+		m_State = StateSuspended;
 	}
 
 	CDWHCIRegister IntStatus (DWHCI_CORE_INT_STAT, DWHCI_CORE_INT_MASK_USB_SUSPEND);
@@ -525,6 +541,30 @@ void CDWUSBGadget::HandleUSBReset (void)
 #ifdef USB_GADGET_DEBUG
 	LOGDBG ("USB reset");
 #endif
+
+	// Trace: always log bus reset with current state (diagnosis for issue #591)
+	LOGTRACE ("USB reset (state %u)", (unsigned) m_State);
+
+	switch (m_State)
+	{
+	case StateConfigured:
+		SetConfiguration (0);
+		// fall through
+
+	case StateEnumDone:
+	case StateSuspended:
+	case StateResetDone:
+		// A reset arriving from StateSuspended (host warm reboot) or from
+		// StateResetDone (host reset storm) must also cancel EP0's possibly
+		// still-armed SETUP transfer. Otherwise the next SETUP completes
+		// against the stale transfer and is dropped with a wrong length.
+		assert (m_pEP[0]);
+		m_pEP[0]->OnDeactivate ();
+		break;
+
+	default:
+		break;
+	}
 
 	// Set NAK for all OUT EPs
 	for (unsigned i = 0; i <= NumberOfOutEPs; i++)
@@ -584,6 +624,16 @@ void CDWUSBGadget::HandleUSBReset (void)
 
 	m_State = StateResetDone;
 
+	// Arm EP0 for SETUP reception already here (as the Linux dwc2 gadget
+	// driver does in its USB reset handler), not only on enumeration done.
+	// Otherwise the first SETUP from a fast host can arrive in the window
+	// between ENUMDONE and OnActivate(): the core ACKs it unconditionally,
+	// but the transfer accounting is attached to nothing and the SETUP is
+	// dropped with length 0, which makes a PC BIOS miss the device on warm
+	// reboot. OnActivate() is idempotent and will not arm a second time.
+	assert (m_pEP[0]);
+	m_pEP[0]->OnActivate ();
+
 	CDWHCIRegister IntStatus (DWHCI_CORE_INT_STAT, DWHCI_CORE_INT_MASK_USB_RESET_INTR);
 	IntStatus.Write ();
 }
@@ -594,21 +644,42 @@ void CDWUSBGadget::HandleEnumerationDone (void)
 	LOGDBG ("Enumeration done");
 #endif
 
-	if (m_State != StateResetDone)
+	// Trace: always log which speed this enumeration settled on, to diagnose
+	// hosts that bounce between High-Speed and Full-Speed (issue #591)
 	{
-		return;
+		TDeviceSpeed Speed = GetNegotiatedUSBSpeed ();
+		LOGTRACE ("Enumeration done at %s (state %u)",
+			   Speed == FullSpeed ? "Full-Speed"
+			 : Speed == HighSpeed ? "High-Speed" : "Unknown",
+			 (unsigned) m_State);
 	}
 
-	CDWHCIRegister USBConfig (DWHCI_CORE_USB_CFG);
-	USBConfig.Read ();
-	USBConfig.And (~DWHCI_CORE_USB_CFG_TURNAROUND_TIME__MASK);
-	USBConfig.Or (9 << DWHCI_CORE_USB_CFG_TURNAROUND_TIME__SHIFT);
-	USBConfig.Write ();
+	if (m_State == StateSuspended)
+	{
+		HandleUSBReset ();
+	}
 
-	assert (m_pEP[0]);
-	m_pEP[0]->OnActivate ();
+	if (m_State == StateResetDone)
+	{
+		CDWHCIRegister USBConfig (DWHCI_CORE_USB_CFG);
+		USBConfig.Read ();
+		USBConfig.And (~DWHCI_CORE_USB_CFG_TURNAROUND_TIME__MASK);
+		USBConfig.Or (9 << DWHCI_CORE_USB_CFG_TURNAROUND_TIME__SHIFT);
+		USBConfig.Write ();
 
-	m_State = StateEnumDone;
+		// Notify the gadget about the speed, which has been negotiated with
+		// the host, so it can adapt its EP parameters (e.g. max. packet size,
+		// configuration descriptor), when the negotiated speed differs from
+		// the configured one.
+		OnNegotiatedSpeed (GetNegotiatedUSBSpeed ());
+
+		assert (m_pEP[0]);
+		m_pEP[0]->OnActivate ();
+
+		m_State = StateEnumDone;
+	}
+
+	assert (m_State == StateEnumDone);
 
 	CDWHCIRegister IntStatus (DWHCI_CORE_INT_STAT, DWHCI_CORE_INT_MASK_ENUM_DONE);
 	IntStatus.Write ();
@@ -620,7 +691,8 @@ void CDWUSBGadget::HandleInEPInterrupt (void)
 	LOGDBG ("In EP interrupt");
 #endif
 
-	assert (   m_State == StateEnumDone
+	assert (   m_State == StateSuspended
+		|| m_State == StateEnumDone
 		|| m_State == StateConfigured);
 
 	CDWHCIRegister AllEPsIntStat (DWHCI_DEV_ALL_EPS_INT_STAT);
@@ -631,9 +703,19 @@ void CDWUSBGadget::HandleInEPInterrupt (void)
 	{
 		if (nInEPStat & 1)
 		{
-			assert (nEP <= NumberOfEPs);
-			assert (m_pEP[nEP]);
-			m_pEP[nEP]->HandleInInterrupt ();
+			if (m_State != StateSuspended)
+			{
+				assert (nEP <= NumberOfEPs);
+				assert (m_pEP[nEP]);
+				m_pEP[nEP]->HandleInInterrupt ();
+			}
+			else
+			{
+				// Suspended: acknowledge without processing (a transfer,
+				// which completed while suspend was being handled)
+				CDWHCIRegister InEPIntAck (DWHCI_DEV_IN_EP_INT (nEP), ~0U);
+				InEPIntAck.Write ();
+			}
 		}
 	}
 }
@@ -644,7 +726,8 @@ void CDWUSBGadget::HandleOutEPInterrupt (void)
 	LOGDBG ("Out EP interrupt");
 #endif
 
-	assert (   m_State == StateEnumDone
+	assert (   m_State == StateSuspended
+		|| m_State == StateEnumDone
 		|| m_State == StateConfigured);
 
 	CDWHCIRegister AllEPsIntStat (DWHCI_DEV_ALL_EPS_INT_STAT);
@@ -655,9 +738,19 @@ void CDWUSBGadget::HandleOutEPInterrupt (void)
 	{
 		if (nOutEPStat & 1)
 		{
-			assert (nEP <= NumberOfEPs);
-			assert (m_pEP[nEP]);
-			m_pEP[nEP]->HandleOutInterrupt ();
+			if (m_State != StateSuspended)
+			{
+				assert (nEP <= NumberOfEPs);
+				assert (m_pEP[nEP]);
+				m_pEP[nEP]->HandleOutInterrupt ();
+			}
+			else
+			{
+				CDWHCIRegister OutEPIntAck (DWHCI_DEV_OUT_EP_INT (nEP));
+				OutEPIntAck.Set (  DWHCI_DEV_OUT_EP_INT_SETUP_DONE
+						 | DWHCI_DEV_OUT_EP_INT_XFER_COMPLETE);
+				OutEPIntAck.Write ();
+			}
 		}
 	}
 }
@@ -671,12 +764,14 @@ void CDWUSBGadget::InterruptHandler (void)
 	u32 nIntStatus = IntStatus.Read () & IntMask.Read ();
 
 #ifdef USB_GADGET_DEBUG
-	LOGDBG ("IRQ (status 0x%08X)", nIntStatus);
+	LOGDBG ("IRQ (status 0x%08X, state %u)", nIntStatus, (unsigned) m_State);
 #endif
 
 	if (nIntStatus & DWHCI_CORE_INT_MASK_USB_SUSPEND)
 	{
 		HandleUSBSuspend ();
+
+		nIntStatus = 0;
 	}
 
 	if (nIntStatus & DWHCI_CORE_INT_MASK_USB_RESET_INTR)
@@ -747,6 +842,26 @@ void CDWUSBGadget::SetDeviceAddress (u8 uchAddress)
 
 boolean CDWUSBGadget::SetConfiguration (u8 uchConfiguration)
 {
+	if (uchConfiguration == 0)
+	{
+		if (m_State == StateEnumDone)
+		{
+			return TRUE;
+		}
+
+		m_State = StateEnumDone;
+
+		for (unsigned i = 1; i <= NumberOfEPs; i++)
+		{
+			if (m_pEP[i])
+			{
+				m_pEP[i]->OnDeactivate ();
+			}
+		}
+
+		return TRUE;
+	}
+
 	if (uchConfiguration != 1)
 	{
 		return FALSE;
@@ -776,4 +891,24 @@ boolean CDWUSBGadget::SetConfiguration (u8 uchConfiguration)
 	m_bPnPEvent[PnPEventConfigured] = TRUE;
 
 	return TRUE;
+}
+
+CDWUSBGadget::TDeviceSpeed CDWUSBGadget::GetNegotiatedUSBSpeed (void) const
+{
+	CDWHCIRegister DeviceStatus (DWHCI_DEV_STS);
+	u32 nEnumSpeed =    (DeviceStatus.Read () & DWHCI_DEV_STS_ENUM_SPEED__MASK)
+			 >> DWHCI_DEV_STS_ENUM_SPEED__SHIFT;
+
+	switch (nEnumSpeed)
+	{
+	case DWHCI_DEV_STS_ENUM_SPEED_HS_30_60:
+		return HighSpeed;
+
+	case DWHCI_DEV_STS_ENUM_SPEED_FS_30_60:
+	case DWHCI_DEV_STS_ENUM_SPEED_FS_48:
+		return FullSpeed;
+
+	default:
+		return DeviceSpeedUnknown;
+	}
 }

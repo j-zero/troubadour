@@ -2,7 +2,7 @@
 // linklayer.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2015-2020  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2015-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -25,9 +25,12 @@
 #include <circle/net/arphandler.h>
 #include <circle/net/ipaddress.h>
 #include <circle/macaddress.h>
-#include <circle/net/netqueue.h>
+#include <circle/net/netbufferqueue.h>
+#include <circle/net/sizes.h>
 #include <circle/macros.h>
 #include <circle/types.h>
+
+#define MAX_MULTICAST_GROUPS	8
 
 struct TEthernetHeader
 {
@@ -38,6 +41,8 @@ struct TEthernetHeader
 #define ETH_PROT_ARP		0x806
 }
 PACKED;
+
+ASSERT_STATIC (sizeof (TEthernetHeader) == ETH_HEADER_LEN);
 
 class CNetworkLayer;
 
@@ -54,10 +59,9 @@ public:
 
 	void Process (void);
 
-	boolean Send (const CIPAddress &rReceiver, const void *pIPPacket, unsigned nLength);
+	boolean Send (const CIPAddress &rReceiver, CNetBuffer *pIPPacket);
 
-	// pBuffer must have size FRAME_BUFFER_SIZE
-	boolean Receive (void *pBuffer, unsigned *pResultLength);
+	CNetBuffer *Receive (void);
 
 public:
 	boolean SendRaw (const void *pFrame, unsigned nLength);
@@ -68,9 +72,16 @@ public:
 	// nProtocolType is in host byte order
 	boolean EnableReceiveRaw (u16 nProtocolType);
 
+	boolean IsRunning (void) const;
+
+	boolean JoinLocalGroup (const CIPAddress &rGroupAddress);
+	boolean LeaveLocalGroup (const CIPAddress &rGroupAddress);
+
 private:
+	boolean UpdateMulticastFilter (void);
+
 	// return IP packet to the network layer for notification
-	void ResolveFailed (const void *pReturnedFrame, unsigned nLength);
+	void ResolveFailed (CNetBuffer *pReturnedFrame);
 	friend class CARPHandler;
 
 private:
@@ -79,11 +90,15 @@ private:
 	CNetworkLayer *m_pNetworkLayer;
 	CARPHandler *m_pARPHandler;
 
-	CNetQueue m_ARPRxQueue;
-	CNetQueue m_IPRxQueue;
+	CNetBufferQueue m_ARPRxQueue;
+	CNetBufferQueue m_IPRxQueue;
 
-	CNetQueue m_RawRxQueue;
+	CNetBufferQueue m_RawRxQueue;
 	u16 m_nRawProtocolType;
+
+	static const unsigned MaxGroups = MAX_MULTICAST_GROUPS;
+	CMACAddress m_MulticastGroup[MaxGroups];
+	unsigned m_nMulticastUseCounter[MaxGroups];
 };
 
 #endif

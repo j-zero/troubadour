@@ -2,7 +2,7 @@
 /// \file scheduler.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2015-2021  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2015-2026  R. Stange <rsta2@o2online.de>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -24,13 +24,21 @@
 #include <circle/spinlock.h>
 #include <circle/device.h>
 #include <circle/sysconfig.h>
+#include <circle/macros.h>
 #include <circle/types.h>
+
+enum TTaskFlags		///< for EnumerateTasks()
+{
+	TaskFlagNone		= 0,
+	TaskFlagRunning		= BIT (0),
+	TaskFlagSuspended	= BIT (1)
+};
 
 typedef void TSchedulerTaskHandler (CTask *pTask);
 
 /// \note This scheduler uses the round-robin policy, without priorities.
 
-class CScheduler /// Cooperative non-preemtive scheduler, which controls which task runs at a time
+class CScheduler /// Cooperative non-preemptive scheduler, which controls which task runs at a time
 {
 public:
 	CScheduler (void);
@@ -74,6 +82,17 @@ public:
 	///	   and starts any tasks that were created suspended.
 	void ResumeNewTasks (void);
 
+	/// \brief Enumerate all tasks
+	/// \param pCallback A callback to be invoked for each task
+	/// \param pParam A user define pointer that will back passed to the callback
+	/// \return FALSE if the enumeration was cancelled by the callback returning FALSE
+	boolean EnumerateTasks (
+		boolean (*pCallback) (CTask *pTask, const char *pName,
+				      TTaskState State, TTaskFlags Flags,
+				      void *pParam),
+		void *pParam
+	);
+
 	/// \brief Generate task listing
 	/// \param pTarget Device to be used for output
 	void ListTasks (CDevice *pTarget);
@@ -92,7 +111,11 @@ private:
 	void AddTask (CTask *pTask);
 	friend class CTask;
 
-	boolean BlockTask (CTask **ppWaitListHead, unsigned nMicroSeconds);
+	// pState is an optional pointer to a synchronization event variable, which is
+	// atomically checked with the blocking operation. When is specified and is set,
+	// the method returns silently.
+	boolean BlockTask (CTask **ppWaitListHead, unsigned nMicroSeconds,
+			    const volatile boolean *pState = 0);
 	void WakeTasks (CTask **ppWaitListHead); // can be called from interrupt context
 	friend class CSynchronizationEvent;
 

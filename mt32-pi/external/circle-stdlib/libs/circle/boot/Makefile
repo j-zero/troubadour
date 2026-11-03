@@ -11,8 +11,8 @@
 # Use most recent firmware test revision
 #FIRMWARE = master
 
-# Use firmware revision built/committed on: Nov 26 2024
-FIRMWARE ?= 4bb9d889a9d48c7335ebe53c0b8be83285ea54b1
+# Use firmware revision built/committed on: Aug 20 2025
+FIRMWARE ?= 0641c5bf25d185d5bf25d8dcafd1da6dc8fdbf68
 
 BASEURL = https://github.com/raspberrypi/firmware/raw/$(FIRMWARE)/boot
 
@@ -21,7 +21,8 @@ FILES = LICENCE.broadcom COPYING.linux \
 	start_cd.elf fixup_cd.dat start4cd.elf fixup4cd.dat \
 	bcm2710-rpi-zero-2-w.dtb bcm2711-rpi-4-b.dtb bcm2711-rpi-400.dtb bcm2711-rpi-cm4.dtb \
 	bcm2712-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb bcm2712-rpi-500.dtb \
-	bcm2712-rpi-cm5-cm5io.dtb bcm2712-rpi-cm5l-cm5io.dtb
+	bcm2712-rpi-cm5-cm5io.dtb bcm2712-rpi-cm5l-cm5io.dtb \
+	bcm2710-rpi-cm0.dtb
 
 OVERLAYS = bcm2712d0.dtbo
 

@@ -5,7 +5,7 @@
 // with the Raspberry Pi 5
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2023-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2023-2026  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -66,6 +66,7 @@
 // General Purpose I/O clocks
 //
 #define ARM_GPIO_CLK_BASE	0x1F00018000UL
+#define ARM_GPIO_CLK_VIDEO_BASE	(ARM_GPIO_CLK_BASE + 0x4000)
 
 //
 // Reset controller
@@ -108,6 +109,39 @@
 
 #define ARM_I2S1_BASE		0x1F000A4000UL
 #define ARM_I2S1_END		(ARM_I2S0_BASE + 0xFFF)
+
+//
+// MIPI DSI devices (RP1)
+//
+#define ARM_MIPI0_DMA_BASE	0x1F00118000UL
+#define ARM_MIPI0_DSI_BASE	0x1F0011C000UL
+#define ARM_MIPI0_CFG_BASE	0x1F00120000UL
+
+#define ARM_MIPI1_DMA_BASE	0x1F00130000UL
+#define ARM_MIPI1_DSI_BASE	0x1F00134000UL
+#define ARM_MIPI1_CFG_BASE	0x1F00138000UL
+
+//
+// SYSCFG / Mailbox (RP1)
+//
+#define ARM_SYSCFG_BASE		0x1F00008000UL
+#define ARM_SYSCFG_END		(ARM_SYSCFG_BASE + 0x3FFF)
+
+//
+// SRAM (RP1)
+//
+#define ARM_SRAM_BASE		0x1F00400000UL
+#define ARM_SRAM_END		(ARM_SRAM_BASE + 0xFFFF)
+
+// Firmware mailbox buffer
+#define ARM_RP1_FW_MBOX_BASE	(ARM_SRAM_BASE + 0xFF00)
+#define ARM_RP1_FW_MBOX_END	(ARM_RP1_FW_MBOX_BASE + 0xFF)
+
+//
+// PIO device (RP1)
+//
+#define ARM_PIO0_BASE		0x1F00178000UL
+#define ARM_PIO0_END		(ARM_PIO0_BASE + 0x1F)
 
 #endif
 

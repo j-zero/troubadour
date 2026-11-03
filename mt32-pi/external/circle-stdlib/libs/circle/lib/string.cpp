@@ -2,7 +2,7 @@
 // string.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2021  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
 //
 // ftoa() inspired by Arjan van Vught <info@raspberrypi-dmx.nl>
 //
@@ -197,11 +197,21 @@ void CString::Append (const char *pString)
 
 int CString::Compare (const char *pString) const
 {
+	if (m_pBuffer == 0)
+	{
+		return *pString == '\0';
+	}
+
 	return strcmp (m_pBuffer, pString);
 }
 
 int CString::Find (char chChar) const
 {
+	if (m_pBuffer == 0)
+	{
+		return -1;
+	}
+
 	int nPos = 0;
 
 	for (char *p = m_pBuffer; *p; p++)
@@ -217,6 +227,22 @@ int CString::Find (char chChar) const
 	return -1;
 }
 
+void CString::TrimRight (const char *pTargets)
+{
+	if (m_pBuffer)
+	{
+		for (int i = (int) strlen (m_pBuffer)-1; i >= 0; i--)
+		{
+			if (!strchr (pTargets, m_pBuffer[i]))
+			{
+				break;
+			}
+
+			m_pBuffer[i] = '\0';
+		}
+	}
+}
+
 int CString::Replace (const char *pOld, const char *pNew)
 {
 	int nResult = 0;
@@ -226,7 +252,7 @@ int CString::Replace (const char *pOld, const char *pNew)
 		return nResult;
 	}
 
-	CString OldString (m_pBuffer);
+	CString OldString (m_pBuffer != 0 ? m_pBuffer : "");
 
 	delete [] m_pBuffer;
 	m_nSize = FORMAT_RESERVE;
@@ -541,9 +567,16 @@ void CString::FormatV (const char *pFormat, va_list Args)
 				nBase = 10;
 				goto FormatNumber;
 
+			case 'p':
+				bAlternate = TRUE;
+#if STDLIB_SUPPORT >= 1
+				bLongLong = FALSE;
+#endif
+				bLong = TRUE;
+				// fall through
+
 			case 'x':
 			case 'X':
-			case 'p':
 				if (bAlternate)
 				{
 					PutString (*pFormat == 'X' ? "0X" : "0x");

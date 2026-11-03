@@ -2,7 +2,7 @@
 // logger.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -119,6 +119,11 @@ void CLogger::SetNewTarget (CDevice *pTarget)
 	m_pTarget = pTarget;
 }
 
+CDevice *CLogger::GetTarget (void) const
+{
+	return m_pTarget;
+}
+
 void CLogger::Write (const char *pSource, TLogSeverity Severity, const char *pMessage, ...)
 {
 	va_list var;
@@ -134,7 +139,10 @@ void CLogger::WriteV (const char *pSource, TLogSeverity Severity, const char *pM
 	CString Message;
 	Message.FormatV (pMessage, Args);
 
-	WriteEvent (pSource, Severity, Message);
+	if (Severity < LogTrace)
+	{
+		WriteEvent (pSource, Severity, Message);
+	}
 
 	if (Severity > m_nLogLevel)
 	{
@@ -315,7 +323,7 @@ int CLogger::Read (void *pBuffer, unsigned nCount, boolean bClear)
 	{
 		m_SpinLock.Release ();
 
-		return -1;
+		return 0;
 	}
 
 	char *pchBuffer = (char *) pBuffer;

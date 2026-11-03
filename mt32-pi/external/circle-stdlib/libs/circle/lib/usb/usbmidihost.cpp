@@ -5,7 +5,7 @@
 // 	Copyright (C) 2016  J. Otto <joshua.t.otto@gmail.com>
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2017-2023  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2017-2026  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -40,9 +40,26 @@ CUSBMIDIHostDevice::CUSBMIDIHostDevice (CUSBFunction *pFunction)
 	m_pInterface (0),
 	m_pEndpointIn (0),
 	m_pEndpointOut (0),
-	m_pPacketBuffer (0),
+	m_nNextBuffer (0),
 	m_hTimer (0)
 {
+	for (unsigned i = 0; i < RXBufferCount; i++)
+	{
+		m_pPacketBuffer[i] = 0;
+	}
+
+	const TUSBDeviceDescriptor *pDeviceDesc = GetDevice ()->GetDeviceDescriptor ();
+	assert (pDeviceDesc != 0);
+
+	// special handling for Roland JD-08
+	if (   pDeviceDesc->idVendor  == 0x0582
+	    && pDeviceDesc->idProduct == 0x028C)
+	{
+		if (!SelectInterfaceByClass (255, 3, 0))
+		{
+			CLogger::Get ()->Write (FromMIDI, LogError, "Cannot select interface");
+		}
+	}
 }
 
 CUSBMIDIHostDevice::~CUSBMIDIHostDevice (void)
@@ -56,8 +73,11 @@ CUSBMIDIHostDevice::~CUSBMIDIHostDevice (void)
 	delete m_pInterface;
 	m_pInterface = 0;
 
-	delete [] m_pPacketBuffer;
-	m_pPacketBuffer = 0;
+	for (unsigned i = 0; i < RXBufferCount; i++)
+	{
+		delete [] m_pPacketBuffer[i];
+		m_pPacketBuffer[i] = 0;
+	}
 
 	delete m_pEndpointIn;
 	m_pEndpointIn = 0;
@@ -75,11 +95,12 @@ boolean CUSBMIDIHostDevice::Configure (void)
 		return FALSE;
 	}
 
-	// special handling for Roland UM-ONE MIDI interface
+	// special handling for Roland UM-ONE and JD-08
 	const TUSBDeviceDescriptor *pDeviceDesc = GetDevice ()->GetDeviceDescriptor ();
 	assert (pDeviceDesc != 0);
-	boolean bIsRolandUMOne =    pDeviceDesc->idVendor  == 0x0582
-				 && pDeviceDesc->idProduct == 0x012A;
+	boolean bIsRoland =    pDeviceDesc->idVendor == 0x0582
+			    && (   pDeviceDesc->idProduct == 0x012A
+			        || pDeviceDesc->idProduct == 0x028C);
 
 	// Our strategy for now is simple: we'll take the first MIDI streaming
 	// bulk-in endpoint on this interface we can find.  To distinguish
@@ -96,7 +117,7 @@ boolean CUSBMIDIHostDevice::Configure (void)
 			continue;
 		}
 
-		if (!bIsRolandUMOne)
+		if (!bIsRoland)
 		{
 			TUSBMIDIStreamingEndpointDescriptor *pMIDIDesc =
 				(TUSBMIDIStreamingEndpointDescriptor *) GetDescriptor (DESCRIPTOR_CS_ENDPOINT);
@@ -123,9 +144,12 @@ boolean CUSBMIDIHostDevice::Configure (void)
 			m_usBufferSize -=   pEndpointDesc->wMaxPacketSize
 					  % CUSBMIDIDevice::EventPacketSize;
 
-			assert (m_pPacketBuffer == 0);
-			m_pPacketBuffer = new u8[m_usBufferSize];
-			assert (m_pPacketBuffer != 0);
+			for (unsigned i = 0; i < RXBufferCount; i++)
+			{
+				assert (m_pPacketBuffer[i] == 0);
+				m_pPacketBuffer[i] = new u8[m_usBufferSize];
+				assert (m_pPacketBuffer[i] != 0);
+			}
 		}
 		else							// Output EP
 		{
@@ -158,7 +182,7 @@ boolean CUSBMIDIHostDevice::Configure (void)
 
 	// attach interface device
 	assert (m_pInterface == 0);
-	m_pInterface = new CUSBMIDIDevice;
+	m_pInterface = new CUSBMIDIDevice (this);
 	assert (m_pInterface != 0);
 	m_pInterface->RegisterSendEventsHandler (SendEventsHandler, this);
 
@@ -188,14 +212,25 @@ boolean CUSBMIDIHostDevice::SendEventsHandler (const u8 *pData, unsigned nLength
 boolean CUSBMIDIHostDevice::StartRequest (void)
 {
 	assert (m_pEndpointIn != 0);
-	assert (m_pPacketBuffer != 0);
+	assert (m_nNextBuffer < RXBufferCount);
+	assert (m_pPacketBuffer[m_nNextBuffer] != 0);
 
 	assert (m_usBufferSize > 0);
-	CUSBRequest *pURB = new CUSBRequest (m_pEndpointIn, m_pPacketBuffer, m_usBufferSize);
+	u8 *pPacketBuffer = m_pPacketBuffer[m_nNextBuffer];
+	m_nNextBuffer = (m_nNextBuffer + 1) % RXBufferCount;
+
+	CUSBRequest *pURB = new CUSBRequest (m_pEndpointIn, pPacketBuffer, m_usBufferSize);
 	assert (pURB != 0);
 	pURB->SetCompletionRoutine (CompletionStub, 0, this);
 
-	pURB->SetCompleteOnNAK ();	// do not retry if request cannot be served immediately
+#if defined (USB_MIDI_FIQ_COMPLETION) && defined (USE_USB_FIQ)
+	pURB->SetCompleteImmediately ();
+#endif
+
+	if (!(CKernelOptions::Get ()->GetUSBBoost () & USB_MIDI_BOOST_NO_COMPLETE_ON_NAK))
+	{
+		pURB->SetCompleteOnNAK (); // do not retry if request cannot be served immediately
+	}
 
 	return GetHost ()->SubmitAsyncRequest (pURB);
 }
@@ -206,14 +241,22 @@ void CUSBMIDIHostDevice::CompletionRoutine (CUSBRequest *pURB)
 	assert (m_pInterface != 0);
 
 	boolean bRestart = FALSE;
+	u8 *pPacketBuffer = static_cast<u8 *> (pURB->GetBuffer ());
+	unsigned nResultLength = pURB->GetStatus () ? pURB->GetResultLength () : 0;
 
 	if (   pURB->GetStatus () != 0
-	    && pURB->GetResultLength () % CUSBMIDIDevice::EventPacketSize == 0)
+	    && nResultLength % CUSBMIDIDevice::EventPacketSize == 0)
 	{
-		assert (m_pPacketBuffer != 0);
+		if (   (CKernelOptions::Get ()->GetUSBBoost () & USB_MIDI_BOOST_EARLY_RESUBMIT)
+		    && nResultLength > 0)
+		{
+			m_pInterface->CallPacketHandler (pPacketBuffer, nResultLength);
+			delete pURB;
+			StartRequest ();
+			return;
+		}
 
-		bRestart = m_pInterface->CallPacketHandler (m_pPacketBuffer,
-							    pURB->GetResultLength ());
+		bRestart = m_pInterface->CallPacketHandler (pPacketBuffer, nResultLength);
 	}
 	else if (   m_pInterface->GetAllSoundOffOnUSBError ()
 		 && !pURB->GetStatus ()
@@ -229,7 +272,7 @@ void CUSBMIDIHostDevice::CompletionRoutine (CUSBRequest *pURB)
 	delete pURB;
 
 	if (   bRestart
-	    || CKernelOptions::Get ()->GetUSBBoost ())
+	    || (CKernelOptions::Get ()->GetUSBBoost () & USB_MIDI_BOOST_NO_DELAY_ON_IDLE))
 	{
 		StartRequest ();
 	}

@@ -4,7 +4,7 @@
 // USB Mass Storage Gadget by Mike Messinides
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2023-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2023-2025  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@
 #include <circle/interrupt.h>
 #include <circle/device.h>
 #include <circle/synchronize.h>
+#include <circle/sysconfig.h>
 #include <circle/macros.h>
 #include <circle/types.h>
 
@@ -141,9 +142,13 @@ class CUSBMSDGadget : public CDWUSBGadget	/// USB mass storage device gadget
 public:
 	/// \param pInterruptSystem Pointer to the interrupt system object
 	/// \param pDevice Pointer to the block device, to be controlled by this gadget
+	/// \param usVendorID USB vendor ID of the gadget
+	/// \param usProductID USB product ID of the gadget
 	/// \note pDevice must be initialized yet, when it is specified here.
 	/// \note SetDevice() has to be called later, when pDevice is not specified here.
-	CUSBMSDGadget (CInterruptSystem *pInterruptSystem, CDevice *pDevice = nullptr);
+	CUSBMSDGadget (CInterruptSystem *pInterruptSystem, CDevice *pDevice = nullptr,
+		       u16 usVendorID = USB_GADGET_VENDOR_ID,
+		       u16 usProductID = USB_GADGET_DEVICE_ID_MSD);
 
 	~CUSBMSDGadget (void);
 
@@ -184,12 +189,15 @@ private:
 
 	int OnClassOrVendorRequest (const TSetupData *pSetupData, u8 *pData) override;
 
+	void OnNegotiatedSpeed (TDeviceSpeed Speed) override;
+
 private:
 	friend class CUSBMSDGadgetEndpoint;
 
 	void OnTransferComplete (boolean bIn, size_t nLength);
 
 	void OnActivate(); //called from OUT ep
+	void OnDeactivate();
 
 private:
 	void HandleSCSICommand();
@@ -213,7 +221,7 @@ private:
 	u8 m_StringDescriptorBuffer[80];
 
 private:
-	static const TUSBDeviceDescriptor s_DeviceDescriptor;
+	static TUSBDeviceDescriptor s_DeviceDescriptor;
 
 	struct TUSBMSTGadgetConfigurationDescriptor
 	{
@@ -225,6 +233,10 @@ private:
 	PACKED;
 
 	static const TUSBMSTGadgetConfigurationDescriptor s_ConfigurationDescriptor;
+
+	// Copy of s_ConfigurationDescriptor with the bulk max packet size
+	// adapted to the USB speed, which has been negotiated with the host
+	TUSBMSTGadgetConfigurationDescriptor m_ConfigurationDescriptor;
 
 	static const char *const s_StringDescriptor[];
 

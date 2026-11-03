@@ -1,1 +1,5 @@
-circle-newlib
+/circle-newlib
+/libc++
+/libcxx-fetch
+/libcxx-threading
+/libcxx-support

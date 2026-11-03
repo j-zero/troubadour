@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MT-32 emulation (mt32emu/Munt), including the `default_synth` option, the `[mt32emu]` section and the MT-32 custom SysEx commands. Only FluidSynth is used.
 
 - Updated FluidSynth to 2.6.2. The port now uses FluidSynth's `embedded` OS abstraction instead of removing glib from it.
+- Updated circle-stdlib to v21 (Circle Step 51.1.1); the recommended toolchain is now GCC 15.2.Rel1. FatFs fast seek is enabled with a patch, as Circle no longer does by default; texinfo isn't needed to build newlib.
 
 ## [0.13.1] - 2023-03-18
 

@@ -2,7 +2,7 @@
 // util.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -66,11 +66,50 @@ int memcmp (const void *pBuffer1, const void *pBuffer2, size_t nLength)
 	return 0;
 }
 
+void *memmem (const void *pHaystack, size_t haystackLength, const void *pNeedle, size_t needleLength)
+{
+	if (haystackLength == 0)
+	{
+		if (needleLength > 0)
+		{
+			return 0;
+		}
+
+		return (void *) pHaystack;
+	}
+
+	while (haystackLength >= needleLength)
+	{
+		if (memcmp(pHaystack, pNeedle, needleLength) == 0)
+		{
+			return (void *) pHaystack;
+		}
+		// pHaystack++; however ISO c++ doesn't allow void* pointer arithmetic, so we need to do some casts
+		pHaystack = static_cast<const void *>( static_cast<const char*>(pHaystack) + 1);
+		haystackLength--;
+	}
+
+	return 0;
+}
+
 size_t strlen (const char *pString)
 {
 	size_t nResult = 0;
 
 	while (*pString++)
+	{
+		nResult++;
+	}
+
+	return nResult;
+}
+
+size_t strnlen (const char *pString, size_t nMaxLen)
+{
+	size_t nResult = 0;
+
+	while (    nMaxLen--
+	       &&  *pString++)
 	{
 		nResult++;
 	}
@@ -725,3 +764,28 @@ int parity32 (unsigned nValue)
 }
 
 #endif
+
+u32 ether_crc (size_t ulLength, const u8 *pData)
+{
+	u32 nCRC = ~0;
+	while (ulLength--)
+	{
+		nCRC ^= *pData++;
+
+		for (unsigned i = 0; i < 8; i++)
+		{
+			nCRC = (nCRC >> 1) ^ ((nCRC & 1) ? 0xEDB88320 : 0);
+		}
+	}
+
+	// reverse bits
+	u32 nCRC_BE = 0;
+	unsigned i;
+	for (i = 0; nCRC; i++, nCRC >>= 1)
+	{
+		nCRC_BE <<= 1;
+		nCRC_BE |= nCRC & 1;
+	}
+
+	return nCRC_BE << (32 - i);
+}

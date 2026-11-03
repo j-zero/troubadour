@@ -2,7 +2,7 @@
 // os_circle.cpp
 //
 // OS specific functions for Circle
-// by R. Stange <rsta2@o2online.de>
+// by R. Stange <rsta2@gmx.net>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 2 as
@@ -11,7 +11,7 @@
 // Alternatively, this software may be distributed under the terms of BSD
 // license.
 //
-#include "os_circle.h"
+#include "os.h"
 #include <circle/string.h>
 #include <circle/logger.h>
 #include <circle/timer.h>
@@ -30,9 +30,19 @@ int abs (int i)
 	return i < 0 ? -i : i;
 }
 
+int isblank (int c)
+{
+	return c == ' ' || c == '\t';
+}
+
 int isprint (int c)
 {
 	return ' ' <= c && c <= 126;
+}
+
+int isspace (int c)
+{
+	return c == ' ' || c == '\f' || c == '\n' || c == '\r' || c == '\t' || c == '\v';
 }
 
 char *strrchr (const char *s, int c)
@@ -61,6 +71,18 @@ char *strdup (const char *s)
 	assert (p != 0);
 
 	return strcpy (p, s);
+}
+
+long strtol (const char *nptr, char **endptr, int base)
+{
+	return strtoul (nptr, endptr, base);
+}
+
+// TODO: needed by wpas_sched_scan_plans_set() in wpa_supplicant/scan.c,
+//	 which is currently not supported
+int sscanf (const char *str, const char *format, ...)
+{
+	return 0;
 }
 
 int snprintf (char *str, size_t size, const char *format, ...)
@@ -166,6 +188,16 @@ void abort (void)
 #endif
 }
 
+int os_daemonize (const char *pid_file)
+{
+	return -1;
+}
+
+void os_daemonize_terminate (const char *pid_file)
+{
+	assert (0);
+}
+
 int os_get_random (unsigned char *buf, size_t len)
 {
 	static CBcmRandomNumberGenerator *s_pRNG = 0;
@@ -211,10 +243,41 @@ int os_get_random (unsigned char *buf, size_t len)
 	return 0;
 }
 
+unsigned long os_random (void)
+{
+	static int state = 0;
+
+	state = (state * 1103515245U + 12345U) & 0x7FFFFFFF;
+
+	return state;
+}
+
+// TODO: currently expecting absolute path already
+char *os_rel2abs_path (const char *rel_path)
+{
+	if (!rel_path)
+	{
+		return NULL;
+	}
+
+	return strdup (rel_path);
+}
+
 int os_get_time (struct os_time *t)
 {
 	unsigned sec, usec;
 	CTimer::Get ()->GetLocalTime (&sec, &usec);
+
+	t->sec = sec;
+	t->usec = usec;
+
+	return 0;
+}
+
+int os_get_reltime (struct os_reltime *t)
+{
+	unsigned sec, usec;
+	CTimer::Get ()->GetUptime (&sec, &usec);
 
 	t->sec = sec;
 	t->usec = usec;
@@ -245,7 +308,34 @@ size_t os_strlcpy (char *dest, const char *src, size_t siz)
 	return strlen (dest);
 }
 
-void * os_zalloc (size_t size)
+int os_memcmp_const (const void *a, const void *b, size_t len)
+{
+	const u8 *aa = (const u8 *) a;
+	const u8 *bb = (const u8 *) b;
+	size_t i;
+	u8 res;
+
+	for (res = 0, i = 0; i < len; i++)
+	{
+		res |= aa[i] ^ bb[i];
+	}
+
+	return res;
+}
+
+void *os_memdup (const void *src, size_t len)
+{
+	void *r = os_malloc (len);
+
+	if (r && src)
+	{
+		os_memcpy (r, src, len);
+	}
+
+	return r;
+}
+
+void *os_zalloc (size_t size)
 {
 	void *p = malloc (size);
 	assert (p != 0);

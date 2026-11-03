@@ -2,7 +2,7 @@
 # Makefile
 #
 # Circle - A C++ bare metal environment for Raspberry Pi
-# Copyright (C) 2014-2024  R. Stange <rsta2@o2online.de>
+# Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
 # 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ OBJS	= actled.o alloc.o assert.o display.o windowdisplay.o bcmframebuffer.o bcmm
 	  util_fast.o virtualgpiopin.o chainboot.o macaddress.o netdevice.o \
 	  new.o heapallocator.o pageallocator.o setjmp.o numberpool.o \
 	  writebuffer.o 2dgraphics.o ptrlistfiq.o \
-	  font6x7.o font8x8.o font8x10.o font8x12.o font8x14.o font8x16.o
+	  font6x7.o font8x8.o font8x10.o font8x12.o font8x14.o font8x16.o font12x22.o
 
 OBJS32	= cache-v7.o exceptionhandler.o exceptionstub.o memory.o pagetable.o \
 	  startup.o synchronize.o
@@ -39,6 +39,10 @@ OBJS64	= exceptionhandler64.o exceptionstub64.o memory64.o startup64.o \
 	  synchronize64.o translationtable64.o
 
 all: libcircle.a
+
+# For the core library we disable the Address Sanitizer to avoid
+# problems in case of errors inside the library code itself.
+NO_SANITIZE	:= 1
 
 include ../Rules.mk
 
@@ -70,7 +74,7 @@ OBJS	+= southbridge.o dmachannel-rp1.o gpiomanager2712.o gpiopin2712.o gpioclock
 	   pwmoutput-rp1.o i2cmaster-rp1.o spimaster-rp1.o spimasterdma-rp1.o macb.o
 endif
 
-ifneq ($(strip $(STDLIB_SUPPORT)),3)
+ifeq ($(filter 3 4,$(strip $(STDLIB_SUPPORT))),)
 OBJS	+= purecall.o cxa_guard.o
 endif
 
@@ -79,6 +83,10 @@ ifeq ($(strip $(AARCH)),32)
 CFLAGS += -mno-unaligned-access
 else
 CFLAGS += -mstrict-align
+endif
+
+ifeq ($(strip $(KASAN_ENABLED)),1)
+OBJS	+= kasan.o
 endif
 
 libcircle.a: $(OBJS)

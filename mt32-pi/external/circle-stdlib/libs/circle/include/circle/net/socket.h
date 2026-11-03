@@ -2,7 +2,7 @@
 // socket.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2015-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2015-2026  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -24,6 +24,7 @@
 #include <circle/net/ipaddress.h>
 #include <circle/net/netconfig.h>
 #include <circle/net/transportlayer.h>
+#include <circle/net/error.h>
 #include <circle/types.h>
 
 #define SOCKET_MAX_LISTEN_BACKLOG	32
@@ -40,8 +41,11 @@ public:
 	/// \brief Destructor (terminates an active connection)
 	~CSocket (void);
 
+	/// \return IPPROTO_TCP or IPPROTO_UDP
+	int GetProtocol (void) const;
+
 	/// \brief Bind own port number to this socket
-	/// \param nOwnPort Port number
+	/// \param nOwnPort Port number (0 to assign ephemeral port)
 	/// \return Status (0 success, < 0 on error)
 	int Bind (u16 nOwnPort);
 
@@ -65,7 +69,7 @@ public:
 	/// \brief Send a message to a remote host
 	/// \param pBuffer Pointer to the message
 	/// \param nLength Length of the message
-	/// \param nFlags  MSG_DONTWAIT (non-blocking operation) or 0 (blocking operation)
+	/// \param nFlags  MSG_DONTWAIT (non-blocking operation), MSG_MORE (Sender will send more)
 	/// \return Length of the sent message (< 0 on error)
 	int Send (const void *pBuffer, unsigned nLength, int nFlags);
 
@@ -80,7 +84,7 @@ public:
 	/// \brief Send a message to a specific remote host
 	/// \param pBuffer	Pointer to the message
 	/// \param nLength	Length of the message
-	/// \param nFlags	MSG_DONTWAIT (non-blocking operation) or 0 (blocking operation)
+	/// \param nFlags	MSG_DONTWAIT (non-blocking operation), MSG_MORE (Sender will send more)
 	/// \param rForeignIP	IP address of host to be sent to (ignored on TCP socket)
 	/// \param nForeignPort	Number of port to be sent to (ignored on TCP socket)
 	/// \return Length of the sent message (< 0 on error)
@@ -98,15 +102,45 @@ public:
 	int ReceiveFrom (void *pBuffer, unsigned nLength, int nFlags,
 			 CIPAddress *pForeignIP, u16 *pForeignPort);
 
+	/// \brief Set a timeout for Receive() and ReceiveFrom()
+	/// \param nMicroSeconds Timeout in us (or 0 to wait forever, default)
+	/// \return Status (0 success, < 0 on error)
+	/// \note The timeout applies only, when the flag MSG_DONTWAIT is not used.
+	int SetOptionReceiveTimeout (unsigned nMicroSeconds);
+
+	/// \brief Set a timeout for Send() and SendTo()
+	/// \param nMicroSeconds Timeout in us (or 0 to wait forever, default)
+	/// \return Status (0 success, < 0 on error)
+	/// \note The timeout applies only, when the flag MSG_DONTWAIT is not used.
+	int SetOptionSendTimeout (unsigned nMicroSeconds);
+
 	/// \brief Call this with bAllowed == TRUE after Bind() or Connect() to be able\n
 	/// to send and receive broadcast messages (ignored on TCP socket)
 	/// \param bAllowed Sending and receiving broadcast messages allowed on this socket? (default FALSE)
 	/// \return Status (0 success, < 0 on error)
 	int SetOptionBroadcast (boolean bAllowed);
 
+	/// \brief Add to IP multicast host group (on UDP socket only)
+	/// \param rGroupAddress Group address to be added
+	/// \return Status (0 success, < 0 on error)
+	/// \note Only one host group is allowed per socket.
+	int SetOptionAddMembership (const CIPAddress &rGroupAddress);
+
+	/// \brief Drop from IP multicast host group (on UDP socket only)
+	/// \param rGroupAddress Group address to be dropped
+	/// \return Status (0 success, < 0 on error)
+	int SetOptionDropMembership (const CIPAddress &rGroupAddress);
+
+	/// \return Own port number (or 0 if not assigned yet)
+	u16 GetOwnPort (void) const;
+
 	/// \brief Get IP address of connected remote host
 	/// \return Pointer to IP address (four bytes, 0-pointer if not connected)
 	const u8 *GetForeignIP (void) const;
+
+	typedef CNetConnection::TStatus TStatus;
+	/// \return Socket status
+	TStatus GetStatus (void) const;
 
 private:
 	CSocket (CSocket &rSocket, int hConnection);
@@ -121,6 +155,8 @@ private:
 
 	unsigned m_nBackLog;
 	int m_hListenConnection[SOCKET_MAX_LISTEN_BACKLOG];
+
+	boolean m_bEnableBroadcast;
 };
 
 #endif

@@ -2,7 +2,7 @@
 // dwusbgadgetendpoint.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2023  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2023-2025  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -63,6 +63,22 @@ CDWUSBGadgetEndpoint::~CDWUSBGadgetEndpoint (void)
 {
 	assert (m_pGadget);
 	m_pGadget->RemoveEndpoint (m_nEP);
+}
+
+void CDWUSBGadgetEndpoint::SetMaxPacketSize (size_t nMaxPacketSize)
+{
+	m_nMaxPacketSize = nMaxPacketSize;
+
+	if (m_nEP != 0)
+	{
+		CDWHCIRegister EPCtrl (  m_Direction == DirectionIn
+				       ? DWHCI_DEV_IN_EP_CTRL (m_nEP)
+				       : DWHCI_DEV_OUT_EP_CTRL (m_nEP));
+		EPCtrl.Read ();
+		EPCtrl.And (~DWHCI_DEV_EP_CTRL_MAX_PACKET_SIZ__MASK);
+		EPCtrl.Or (m_nMaxPacketSize << DWHCI_DEV_EP_CTRL_MAX_PACKET_SIZ__SHIFT);
+		EPCtrl.Write ();
+	}
 }
 
 void CDWUSBGadgetEndpoint::OnUSBReset (void)
@@ -255,6 +271,30 @@ void CDWUSBGadgetEndpoint::BeginTransfer (TTransferMode Mode, void *pBuffer, siz
 	}
 }
 
+void CDWUSBGadgetEndpoint::CancelTransfer (void)
+{
+	if (m_TransferMode == TransferDataIn)
+	{
+		CDWHCIRegister InEPCtrl (DWHCI_DEV_IN_EP_CTRL (m_nEP), 0);
+		InEPCtrl.Read ();
+		InEPCtrl.And (~DWHCI_DEV_EP_CTRL_EP_ENABLE);
+		InEPCtrl.And (~DWHCI_DEV_EP_CTRL_CLEAR_NAK);
+		InEPCtrl.Or (DWHCI_DEV_EP_CTRL_EP_DISABLE);
+		InEPCtrl.Write ();
+	}
+	else if (m_TransferMode != TransferUnknown)
+	{
+		CDWHCIRegister OutEPCtrl (DWHCI_DEV_OUT_EP_CTRL (m_nEP));
+		OutEPCtrl.Read ();
+		OutEPCtrl.And (~DWHCI_DEV_EP_CTRL_EP_ENABLE);
+		OutEPCtrl.And (~DWHCI_DEV_EP_CTRL_CLEAR_NAK);
+		OutEPCtrl.Or (DWHCI_DEV_EP_CTRL_EP_DISABLE);
+		OutEPCtrl.Write ();
+	}
+
+	InitTransfer ();
+}
+
 size_t CDWUSBGadgetEndpoint::FinishTransfer (void)
 {
 	assert (m_TransferMode < TransferUnknown);
@@ -275,7 +315,12 @@ size_t CDWUSBGadgetEndpoint::FinishTransfer (void)
 
 	if (nXferSize)
 	{
-		debug_hexdump (m_pTransferBuffer, nXferSize, From);
+		size_t nDumpSize = nXferSize > 16 ? 16 : nXferSize;  // Max 16 bytes
+		debug_hexdump (m_pTransferBuffer, nDumpSize, From);
+		if (nXferSize > 16)
+		{
+			LOGDBG ("... (%u more bytes not shown)", nXferSize - 16);
+		}
 	}
 #endif
 
@@ -327,13 +372,20 @@ void CDWUSBGadgetEndpoint::HandleOutInterrupt (void)
 		OutEPIntAck.Set (DWHCI_DEV_OUT_EP_INT_SETUP_DONE);
 		OutEPIntAck.Write ();
 
-#ifndef NDEBUG
-		size_t nLength =
-#endif
-			FinishTransfer ();
-		assert (nLength == sizeof (TSetupData));
-
-		OnControlMessage ();
+		size_t nLength = FinishTransfer ();
+		if (nLength == sizeof (TSetupData))
+		{
+			OnControlMessage ();
+		}
+		else
+		{
+			// A SETUP can complete against a stale/partial transfer during a
+			// host warm-reboot or aborted control transfer. Do not crash the
+			// system: drop the malformed SETUP and re-arm EP0 (OnActivate) to
+			// receive the next one cleanly.
+			LOGWARN ("Ignoring SETUP with unexpected length %u", (unsigned) nLength);
+			OnActivate ();
+		}
 
 		OutEPInt.And (~DWHCI_DEV_OUT_EP_INT_XFER_COMPLETE);
 	}

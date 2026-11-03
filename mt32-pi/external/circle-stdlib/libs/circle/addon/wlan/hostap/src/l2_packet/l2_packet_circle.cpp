@@ -2,7 +2,7 @@
 // l2_packet_circle.cpp
 //
 // Layer2 packet handling interface for Circle
-// by R. Stange <rsta2@o2online.de>
+// by R. Stange <rsta2@gmx.net>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 2 as
@@ -79,6 +79,15 @@ l2_packet_data * l2_packet_init (const char *ifname, const u8 *own_addr, unsigne
 	eloop_register_read_sock (SOCK_FD, l2_packet_receive, l2, 0);
 
 	return l2;
+}
+
+l2_packet_data * l2_packet_init_bridge (const char *br_ifname, const char *ifname,
+					const u8 *own_addr, unsigned short protocol,
+					void (*rx_callback) (void *ctx, const u8 *src_addr,
+							     const u8 *buf, size_t len),
+					void *rx_callback_ctx, int l2_hdr)
+{
+	return l2_packet_init (br_ifname, own_addr, protocol, rx_callback, rx_callback_ctx, l2_hdr);
 }
 
 void l2_packet_deinit (l2_packet_data *l2)
@@ -171,6 +180,11 @@ void l2_packet_notify_auth_start (l2_packet_data *l2)
 }
 
 int l2_packet_get_ip_addr (l2_packet_data *l2, char *buf, size_t len)
+{
+	return -1;
+}
+
+int l2_packet_set_packet_filter (l2_packet_data *l2, l2_packet_filter_type type)
 {
 	return -1;
 }

@@ -2,7 +2,7 @@
 // koptions.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2023  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -32,7 +32,7 @@ CKernelOptions::CKernelOptions (void)
 	m_nLogLevel (LogDebug),
 	m_nUSBPowerDelay (0),
 	m_bUSBFullSpeed (FALSE),
-	m_bUSBBoost (FALSE),
+	m_nUSBBoost (USB_MIDI_BOOST_NONE),
 	m_USBSoundChannels {0, 0},
 	m_nSoundOption (0),
 	m_CPUSpeed (CPUSpeedLow),
@@ -93,7 +93,7 @@ CKernelOptions::CKernelOptions (void)
 		{
 			unsigned nValue;
 			if (   (nValue = GetDecimal (pValue)) != INVALID_VALUE
-			    && nValue <= LogDebug)
+			    && nValue <= LogTrace)
 			{
 				m_nLogLevel = nValue;
 			}
@@ -121,9 +121,15 @@ CKernelOptions::CKernelOptions (void)
 		}
 		else if (strcmp (pOption, "usbboost") == 0)
 		{
+			unsigned nValue;
 			if (strcmp (pValue, "true") == 0)
 			{
-				m_bUSBBoost = TRUE;
+				m_nUSBBoost = USB_MIDI_BOOST_NO_DELAY_ON_IDLE;
+			}
+			else if (   (nValue = GetDecimal (pValue)) != INVALID_VALUE
+			         && nValue <= USB_MIDI_BOOST_MAX)
+			{
+				m_nUSBBoost = nValue;
 			}
 		}
 		else if (strcmp (pOption, "usbignore") == 0)
@@ -257,9 +263,9 @@ boolean CKernelOptions::GetUSBFullSpeed (void) const
 	return m_bUSBFullSpeed;
 }
 
-boolean CKernelOptions::GetUSBBoost (void) const
+unsigned CKernelOptions::GetUSBBoost (void) const
 {
-	return m_bUSBBoost;
+	return m_nUSBBoost;
 }
 
 const char *CKernelOptions::GetUSBIgnore (void) const
@@ -335,6 +341,24 @@ unsigned CKernelOptions::GetAppOptionDecimal (const char *pOption, unsigned nDef
 	}
 
 	return nValue;
+}
+
+int CKernelOptions::GetAppOptionSignedDecimal (const char *pOption, int nDefault) const
+{
+	const char *pValue = GetAppOptionString (pOption, nullptr);
+	if (!pValue)
+	{
+		return nDefault;
+	}
+
+	char *pEnd = nullptr;
+	unsigned long ulValue = strtoul (pValue, &pEnd, 10);
+	if (pEnd && *pEnd != '\0')
+	{
+		return nDefault;
+	}
+
+	return static_cast<int> (ulValue);
 }
 
 CKernelOptions *CKernelOptions::Get (void)

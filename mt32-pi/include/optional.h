@@ -24,8 +24,10 @@
 #define _optional_h
 
 #include <assert.h>
-#include <circle/new.h>
 #include <circle/types.h>
+
+// Placement new from the standard library; Circle's own declaration conflicts with it since GCC 15
+#include <new>
 
 template<typename T>
 class TOptional

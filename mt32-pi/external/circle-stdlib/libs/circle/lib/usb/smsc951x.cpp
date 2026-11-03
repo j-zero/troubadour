@@ -9,7 +9,7 @@
 // See the file lib/usb/README for details!
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2020  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -65,6 +65,7 @@
 	#define MAC_CR_RCVOWN			0x00800000
 	#define MAC_CR_MCPAS			0x00080000
 	#define MAC_CR_PRMS			0x00040000
+	#define MAC_CR_HPFILT			0x00002000
 	#define MAC_CR_BCAST			0x00000800
 	#define MAC_CR_TXEN			0x00000008
 	#define MAC_CR_RXEN			0x00000004
@@ -129,7 +130,8 @@ static const char FromSMSC951x[] = "smsc951x";
 CSMSC951xDevice::CSMSC951xDevice (CUSBFunction *pFunction)
 :	CUSBFunction (pFunction),
 	m_pEndpointBulkIn (0),
-	m_pEndpointBulkOut (0)
+	m_pEndpointBulkOut (0),
+	m_bLinkUp (FALSE)
 {
 }
 
@@ -273,6 +275,11 @@ boolean CSMSC951xDevice::SendFrame (const void *pBuffer, unsigned nLength)
 
 boolean CSMSC951xDevice::ReceiveFrame (void *pBuffer, unsigned *pResultLength)
 {
+	if (!m_bLinkUp)
+	{
+		return FALSE;
+	}
+
 	assert (m_pEndpointBulkIn != 0);
 	assert (pBuffer != 0);
 	CUSBRequest URB (m_pEndpointBulkIn, pBuffer, FRAME_BUFFER_SIZE);
@@ -317,13 +324,20 @@ boolean CSMSC951xDevice::ReceiveFrame (void *pBuffer, unsigned *pResultLength)
 
 boolean CSMSC951xDevice::IsLinkUp (void)
 {
+	return m_bLinkUp;
+}
+
+boolean CSMSC951xDevice::UpdatePHY (void)
+{
 	u16 usPHYModeStatus;
 	if (!PHYRead (0x01, &usPHYModeStatus))
 	{
-		return FALSE;
+		return TRUE;
 	}
 
-	return usPHYModeStatus & (1 << 2) ? TRUE : FALSE;
+	m_bLinkUp = usPHYModeStatus & (1 << 2) ? TRUE : FALSE;
+
+	return TRUE;
 }
 
 TNetDeviceSpeed CSMSC951xDevice::GetLinkSpeed (void)
@@ -348,6 +362,34 @@ TNetDeviceSpeed CSMSC951xDevice::GetLinkSpeed (void)
 	case 0b110:	return NetDeviceSpeed100Full;
 	default:	return NetDeviceSpeedUnknown;
 	}
+}
+
+boolean CSMSC951xDevice::SetMulticastFilter (const u8 Groups[][MAC_ADDRESS_SIZE])
+{
+	u32 mac_cr = MAC_CR_RCVOWN | MAC_CR_TXEN | MAC_CR_RXEN;
+	u32 hash_hi = 0;
+	u32 hash_lo = 0;
+
+	for (unsigned i = 0; Groups[i][0]; i++)
+	{
+		mac_cr |= MAC_CR_HPFILT;
+
+		u32 bitnum = Hash (Groups[i]);
+		u32 mask = 0x01 << (bitnum & 0x1F);
+		if (bitnum & 0x20)
+			hash_hi |= mask;
+		else
+			hash_lo |= mask;
+	}
+
+	return    WriteReg (HASHH, hash_hi)
+	       && WriteReg (HASHL, hash_lo)
+	       && WriteReg (MAC_CR, mac_cr);
+}
+
+u32 CSMSC951xDevice::Hash (const u8 Address[MAC_ADDRESS_SIZE])
+{
+	return (ether_crc (MAC_ADDRESS_SIZE, Address) >> 26) & 0x3F;
 }
 
 boolean CSMSC951xDevice::PHYWrite (u8 uchIndex, u16 usValue)

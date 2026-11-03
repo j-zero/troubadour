@@ -50,11 +50,13 @@ include $(CIRCLEHOME)/Rules.mk
 
 CFLAGS		+=	-Werror -Wextra -Wno-unused-parameter -Wno-array-bounds
 
-CFLAGS		+=	-I "$(NEWLIBDIR)/include" \
-			-I $(STDDEF_INCPATH) \
-			-I $(CIRCLESTDLIBHOME)/include \
-			-I include \
-			-I .
+# Without a space after -I, so that an empty path can't swallow the next option (newer circle-stdlib versions
+# don't set STDDEF_INCPATH in the files included here)
+CFLAGS		+=	-I"$(NEWLIBDIR)/include" \
+			$(if $(STDDEF_INCPATH),-I$(STDDEF_INCPATH)) \
+			-I$(CIRCLESTDLIBHOME)/include \
+			-Iinclude \
+			-I.
 
 LIBS 		:=	$(CIRCLE_STDLIB_LIBS) \
 			$(CIRCLEHOME)/addon/fatfs/libfatfs.a \

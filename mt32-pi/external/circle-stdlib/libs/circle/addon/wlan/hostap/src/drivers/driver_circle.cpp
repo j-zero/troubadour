@@ -2,7 +2,7 @@
 // driver_circle.cpp
 //
 // Driver interface for Circle network driver
-// by R. Stange <rsta2@o2online.de>
+// by R. Stange <rsta2@gmx.net>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 2 as
@@ -168,13 +168,20 @@ static int wpa_driver_circle_get_ssid (void *priv, u8 *ssid)
 	return drv->ssid_len;
 }
 
-static int wpa_driver_circle_set_key (void *priv, wpa_alg alg, const u8 *addr,
-				      int key_idx, int set_tx, const u8 *seq, size_t seq_len,
-				      const u8 *key, size_t key_len)
+static int wpa_driver_circle_set_key (void *priv, wpa_driver_set_key_params *params)
 {
 	wpa_driver_circle_data *drv = (wpa_driver_circle_data *) priv;
 	assert (drv != 0);
 	assert (drv->netdev != 0);
+
+	wpa_alg alg = params->alg;
+	const u8 *addr = params->addr;
+	int key_idx = params->key_idx;
+	int set_tx = params->set_tx;
+	const u8 *seq = params->seq;
+	size_t seq_len = params->seq_len;
+	const u8 *key = params->key;
+	size_t key_len = params->key_len;
 
 	if (alg == WPA_ALG_NONE)	// TODO: clear key
 	{
@@ -252,6 +259,9 @@ static void wpa_driver_circle_event_handler (ether_event_type_t		 type,
 
 	switch (type)
 	{
+	case ether_event_link:		// ignore
+		break;
+
 	case ether_event_disassoc:
 		drv->ssid_len = 0;
 		wpa_supplicant_event (drv->ctx, EVENT_DISASSOC, 0);
@@ -328,14 +338,43 @@ static int wpa_driver_circle_scan2 (void *priv, wpa_driver_scan_params *params)
 	assert (params != 0);
 
 	// TODO: allow scan params
-	//assert (params->num_ssids == 0);
 	assert (params->extra_ies == 0);
 	assert (params->extra_ies_len == 0);
-	assert (params->freqs == 0);
+	//assert (params->freqs == 0);
+
+	// Pass a directed SSID to the driver so that hidden networks
+	// (scan_ssid=1) are probed for and show up in the scan results. The
+	// driver always probes with a wildcard too, so visible networks are
+	// still found. Only one directed SSID per scan is supported.
+	char ssid[32+1];
+	ssid[0] = '\0';
+	for (size_t i = 0; i < params->num_ssids; i++)
+	{
+		if (params->ssids[i].ssid != 0 && params->ssids[i].ssid_len > 0)
+		{
+			assert (params->ssids[i].ssid_len <= 32);
+			os_memcpy (ssid, params->ssids[i].ssid,
+				   params->ssids[i].ssid_len);
+			ssid[params->ssids[i].ssid_len] = '\0';
+			break;
+		}
+	}
 
 	assert (drv->netdev != 0);
 	// increase scan duration here to be sure, scan is not started again
-	if (!drv->netdev->Control ("escan %u", SCAN_DURATION_SECS+2))
+	boolean bOK;
+	if (ssid[0] != '\0')
+	{
+		CString SSID (ssid);
+		SSID.Replace (" ", "\\x20");	// escape spaces for the ctl parser
+		bOK = drv->netdev->Control ("escan %u %s", SCAN_DURATION_SECS+2,
+					    (const char *) SSID);
+	}
+	else
+	{
+		bOK = drv->netdev->Control ("escan %u", SCAN_DURATION_SECS+2);
+	}
+	if (!bOK)
 	{
 		return -1;
 	}
@@ -453,13 +492,14 @@ static wpa_scan_results *wpa_driver_circle_get_scan_results2 (void *priv)
 	return results;
 }
 
-static int wpa_driver_circle_disassociate (void *priv, const u8 *addr, int reason_code)
+static int wpa_driver_circle_disassociate (void *priv, const u8 *own_addr,
+					   const u8 *addr, u16 reason)
 {
 	wpa_driver_circle_data *drv = (wpa_driver_circle_data *) priv;
 	assert (drv != 0);
 
 	assert (drv->netdev != 0);
-	if (!drv->netdev->Control ("disassoc %d", reason_code))
+	if (!drv->netdev->Control ("disassoc %d", (int) reason))
 	{
 		return -1;
 	}
@@ -495,9 +535,9 @@ static int wpa_driver_circle_associate (void *priv, wpa_driver_associate_params 
 	CString SSID (ssid);
 	SSID.Replace (" ", "\\x20");
 
-	if (params->auth_alg != AUTH_ALG_OPEN_SYSTEM)
+	if (!(params->auth_alg & WPA_AUTH_ALG_OPEN))
 	{
-		wpa_printf (MSG_ERROR, "Auth algorithm not supported (%d)", params->auth_alg);
+		wpa_printf (MSG_ERROR, "Auth algorithm not supported (0x%X)", params->auth_alg);
 
 		return -1;
 	}
@@ -580,9 +620,9 @@ extern "C" const struct wpa_driver_ops wpa_driver_circle_ops =
 	.set_key = wpa_driver_circle_set_key,
 	.init = wpa_driver_circle_init,
 	.deinit = wpa_driver_circle_deinit,
-	.disassociate = wpa_driver_circle_disassociate,
 	.associate = wpa_driver_circle_associate,
 	.get_scan_results2 = wpa_driver_circle_get_scan_results2,
 	.set_country = wpa_driver_circle_set_country,
 	.scan2 = wpa_driver_circle_scan2,
+	.sta_disassoc = wpa_driver_circle_disassociate,
 };

@@ -2,7 +2,7 @@
 // machineinfo.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2016-2025  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2016-2026  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -52,6 +52,7 @@ enum TMachineModel
 	MachineModel500,
 	MachineModelCM5,
 	MachineModelCM5Lite,
+	MachineModelCM0,
 	MachineModelUnknown
 };
 
@@ -101,6 +102,8 @@ public:
 	TSoCType GetSoCType (void) const;
 	TSoCStepping GetSoCStepping (void) const;
 	unsigned GetRAMSize (void) const;		// MByte, 0 on error
+
+	static unsigned GetRAMSizeEarly (void);
 
 	const char *GetSoCName (void) const;
 
@@ -153,9 +156,22 @@ public:
 	unsigned AllocateDMAChannel (unsigned nChannel);
 	void FreeDMAChannel (unsigned nChannel);
 
+#if RASPPI >= 5
+#define DMA_CHANNEL_RP1_MAX	7		// channels 0-7 are supported
+#define DMA_CHANNEL_RP1_NORMAL	0x84		// normal (or fast) DMA engine requested on RP1
+#define DMA_CHANNEL_RP1_FAST	0x85		// fast DMA engine requested on RP1
+
+	// nChannel must be DMA_CHANNEL_RP1_NORMAL, _FAST or an explicit channel number (0-7)
+	// returns the allocated channel number or DMA_CHANNEL_NONE on failure
+	unsigned AllocateDMAChannelRP1 (unsigned nChannel);
+	void FreeDMAChannelRP1 (unsigned nChannel);
+#endif
+
 #if RASPPI >= 4
 	// Devicetree blob handling
 	void FetchDTB (void);
+
+	boolean CheckDTB (boolean bDumpValues = FALSE);	// check DTB properties, used by Circle
 
 	const CDeviceTreeBlob *GetDTB (void) const;
 
@@ -188,6 +204,9 @@ private:
 	unsigned	m_nRAMSize	  MAXALIGN;
 
 	u16		m_usDMAChannelMap MAXALIGN;	// channel bit set if channel is free
+#if RASPPI >= 5
+	u8		m_uchDMAChannelMapRP1 MAXALIGN;	// channel bit set if channel is free
+#endif
 
 #if RASPPI >= 4
 	CDeviceTreeBlob	*m_pDTB		  MAXALIGN;

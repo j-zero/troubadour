@@ -2,7 +2,7 @@
 // machineinfo.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2016-2025  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2016-2026  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,6 +22,8 @@
 #include <circle/sysconfig.h>
 #include <circle/startup.h>
 #include <circle/bcm2712.h>
+#include <circle/logger.h>
+#include <circle/debug.h>
 #include <circle/memio.h>
 #include <circle/util.h>
 #include <assert.h>
@@ -83,7 +85,8 @@ s_NewInfo[]
 	{23, MachineModel5,		5},
 	{24, MachineModelCM5,		5},
 	{25, MachineModel500,		5},
-	{26, MachineModelCM5Lite,	5}
+	{26, MachineModelCM5Lite,	5},
+	{27, MachineModelCM0,		3}
 };
 
 static const char *s_MachineName[] =		// must match TMachineModel
@@ -112,6 +115,7 @@ static const char *s_MachineName[] =		// must match TMachineModel
 	"Raspberry Pi 500",
 	"Compute Module 5",
 	"Compute Module 5 Lite",
+	"Compute Module Zero",
 	"Unknown"
 };
 
@@ -151,9 +155,46 @@ static unsigned s_ActLEDInfo[] =		// must match TMachineModel
 	9 | ACTLED_ACTIVE_LOW,		// 500
 	9 | ACTLED_ACTIVE_LOW,		// CM5
 	9 | ACTLED_ACTIVE_LOW,		// CM5 Lite
+	29 | ACTLED_ACTIVE_LOW,		// CM0
 
 	ACTLED_UNKNOWN			// Unknown
 };
+
+#if RASPPI >= 4
+
+static struct
+{
+	const char *pNode;
+	const char *pProperty;
+	size_t ulValueLength;
+}
+s_DTBInfo[] =
+{
+	 // Node					Property			Length
+
+	{"/system",					"linux,revision",		4},
+
+#if RASPPI == 4
+	{"/scb/pcie@7d500000",				"dma-ranges",			1*7*4},
+#else
+	{"/axi/dma@10000",				"brcm,dma-channel-mask",	4},
+	{"/axi/dma@10600",				"brcm,dma-channel-mask",	4},
+
+	{"/axi/pcie@1000110000",			"dma-ranges",			2*7*4},
+	{"/axi/pcie@1000120000",			"dma-ranges",			3*7*4},
+
+	{"/axi/pcie@1000120000/rp1/ethernet@100000",	"local-mac-address",		6},
+	{"/axi/mmc@1100000/wifi@1",			"local-mac-address",		6},
+
+	{"/soc@107c000000/rpi_rtc",			"trickle-charge-microvolt",	4},
+#endif
+
+	{0, 0, 0}
+};
+
+LOGMODULE ("machinfo");
+
+#endif
 
 CMachineInfo *CMachineInfo::s_pThis = 0;
 
@@ -172,6 +213,7 @@ CMachineInfo::CMachineInfo (void)
 	m_pDTB (0)
 #else
 	m_usDMAChannelMap (0x0FF5),	// default mapping
+	m_uchDMAChannelMapRP1 (0xFF),
 	m_pDTB (0)
 #endif
 {
@@ -363,6 +405,37 @@ unsigned CMachineInfo::GetRAMSize (void) const
 	return m_nRAMSize;
 }
 
+unsigned CMachineInfo::GetRAMSizeEarly (void)
+{
+#if RASPPI >= 5
+	return 2048;	// cannot determine size early, this is the possible minimum
+#else
+	CBcmPropertyTags Tags;
+	TPropertyTagSimple BoardRevision;
+	if (!Tags.GetTag (PROPTAG_GET_BOARD_REVISION, &BoardRevision, sizeof BoardRevision))
+	{
+		return 256;
+	}
+
+	if (BoardRevision.nValue & (1 << 23))		// new revision scheme
+	{
+		return 256 << ((BoardRevision.nValue >> 20) & 7);
+	}
+	else
+	{
+		for (unsigned i = 0; i < sizeof s_OldInfo / sizeof s_OldInfo[0]; i++)
+		{
+			if (s_OldInfo[i].nRevisionRaw == BoardRevision.nValue)
+			{
+				return s_OldInfo[i].nRAMSize;
+			}
+		}
+
+		return 256;
+	}
+#endif
+}
+
 const char *CMachineInfo::GetSoCName (void) const
 {
 	return s_SoCName[m_SoCType];
@@ -383,14 +456,16 @@ unsigned CMachineInfo::GetClockRate (u32 nClockId) const
 	CBcmPropertyTags Tags;
 	TPropertyTagClockRate TagClockRate;
 	TagClockRate.nClockId = nClockId;
-	if (   Tags.GetTag (PROPTAG_GET_CLOCK_RATE, &TagClockRate, sizeof TagClockRate, 4)
+	if (   Tags.GetTag (PROPTAG_GET_CLOCK_RATE_MEASURED, &TagClockRate, sizeof TagClockRate, 4)
 	    && TagClockRate.nRate != 0)
 	{
-		return TagClockRate.nRate;
+		// Round to closest MHz value
+		const unsigned Precision = 1000000;
+		return (TagClockRate.nRate + Precision/2) / Precision * Precision;
 	}
 
 	TagClockRate.nClockId = nClockId;
-	if (   Tags.GetTag (PROPTAG_GET_CLOCK_RATE_MEASURED, &TagClockRate, sizeof TagClockRate, 4)
+	if (   Tags.GetTag (PROPTAG_GET_CLOCK_RATE, &TagClockRate, sizeof TagClockRate, 4)
 	    && TagClockRate.nRate != 0)
 	{
 		return TagClockRate.nRate;
@@ -452,6 +527,7 @@ unsigned CMachineInfo::GetGPIOPin (TGPIOVirtualPin Pin) const
 		if (   m_MachineModel == MachineModelZero
 		    || m_MachineModel == MachineModelZeroW
 		    || m_MachineModel == MachineModelZero2W
+		    || m_MachineModel == MachineModelCM0
 		    || m_MachineModel == MachineModel5)
 		{
 #if defined (USE_GPIO18_FOR_LEFT_PWM_ON_ZERO) || defined (USE_GPIO18_FOR_LEFT_PWM)
@@ -483,6 +559,7 @@ unsigned CMachineInfo::GetGPIOPin (TGPIOVirtualPin Pin) const
 		if (   m_MachineModel == MachineModelZero
 		    || m_MachineModel == MachineModelZeroW
 		    || m_MachineModel == MachineModelZero2W
+		    || m_MachineModel == MachineModelCM0
 		    || m_MachineModel == MachineModel5)
 		{
 #if defined (USE_GPIO19_FOR_RIGHT_PWM_ON_ZERO) || defined (USE_GPIO19_FOR_RIGHT_PWM)
@@ -591,6 +668,7 @@ boolean CMachineInfo::ArePWMChannelsSwapped (void) const
 	       && m_MachineModel != MachineModelZero
 	       && m_MachineModel != MachineModelZeroW
 	       && m_MachineModel != MachineModelZero2W
+	       && m_MachineModel != MachineModelCM0
 	       && m_MachineModel != MachineModel5;
 }
 
@@ -666,6 +744,63 @@ void CMachineInfo::FreeDMAChannel (unsigned nChannel)
 	m_usDMAChannelMap |= 1 << nChannel;
 }
 
+#if RASPPI >= 5
+
+unsigned CMachineInfo::AllocateDMAChannelRP1 (unsigned nChannel)
+{
+	assert (s_pThis != 0);
+	if (s_pThis != this)
+	{
+		return s_pThis->AllocateDMAChannelRP1 (nChannel);
+	}
+
+	if (!(nChannel & ~DMA_CHANNEL__MASK))
+	{
+		// explicit channel allocation
+		assert (nChannel <= DMA_CHANNEL_RP1_MAX);
+		if (m_uchDMAChannelMapRP1 & (1 << nChannel))
+		{
+			m_uchDMAChannelMapRP1 &= ~(1 << nChannel);
+
+			return nChannel;
+		}
+	}
+	else
+	{
+		// arbitrary channel allocation
+		int i = nChannel == DMA_CHANNEL_RP1_FAST ? 1 : DMA_CHANNEL_RP1_MAX;
+		int nMin = 0;
+		for (; i >= nMin; i--)
+		{
+			if (m_uchDMAChannelMapRP1 & (1 << i))
+			{
+				m_uchDMAChannelMapRP1 &= ~(1 << i);
+
+				return (unsigned) i;
+			}
+		}
+	}
+
+	return DMA_CHANNEL_NONE;
+}
+
+void CMachineInfo::FreeDMAChannelRP1 (unsigned nChannel)
+{
+	assert (s_pThis != 0);
+	if (s_pThis != this)
+	{
+		s_pThis->FreeDMAChannelRP1 (nChannel);
+
+		return;
+	}
+
+	assert (nChannel <= DMA_CHANNEL_RP1_MAX);
+	assert (!(m_uchDMAChannelMapRP1 & (1 << nChannel)));
+	m_uchDMAChannelMapRP1 |= 1 << nChannel;
+}
+
+#endif
+
 #if RASPPI >= 4
 
 void CMachineInfo::FetchDTB (void)
@@ -681,6 +816,66 @@ void CMachineInfo::FetchDTB (void)
 
 		*pDTBPtr = 0;		// does not work with chain boot, disable it
 	}
+}
+
+boolean CMachineInfo::CheckDTB (boolean bDumpValues)
+{
+	if (m_pDTB == 0)
+	{
+		LOGWARN ("DTB not available");
+
+		return FALSE;
+	}
+
+	boolean bResult = TRUE;
+
+	for (unsigned i = 0; s_DTBInfo[i].pNode; i++)
+	{
+		const TDeviceTreeNode *pNode = m_pDTB->FindNode (s_DTBInfo[i].pNode);
+		if (pNode != 0)
+		{
+			const TDeviceTreeProperty *pProp =
+				m_pDTB->FindProperty (pNode, s_DTBInfo[i].pProperty);
+			if (pProp != 0)
+			{
+				size_t ulValueLength = m_pDTB->GetPropertyValueLength (pProp);
+
+				if (bDumpValues)
+				{
+					LOGDBG ("DTB property %s/%s:",
+						s_DTBInfo[i].pNode, s_DTBInfo[i].pProperty);
+
+					DebugHexDump (m_pDTB->GetPropertyValue (pProp),
+						      ulValueLength, From, 0);
+				}
+
+				if (ulValueLength != s_DTBInfo[i].ulValueLength)
+				{
+					LOGWARN ("DTB property %s/%s has invalid value length %lu"
+					        " (expected %lu)",
+						s_DTBInfo[i].pNode, s_DTBInfo[i].pProperty,
+						ulValueLength, s_DTBInfo[i].ulValueLength);
+
+					bResult = FALSE;
+				}
+			}
+			else
+			{
+				LOGWARN ("DTB property %s/%s not found",
+					s_DTBInfo[i].pNode, s_DTBInfo[i].pProperty);
+
+				bResult = FALSE;
+			}
+		}
+		else
+		{
+			LOGWARN ("DTB node %s not found", s_DTBInfo[i].pNode);
+
+			bResult = FALSE;
+		}
+	}
+
+	return bResult;
 }
 
 const CDeviceTreeBlob *CMachineInfo::GetDTB (void) const
@@ -742,16 +937,16 @@ TMemoryWindow CMachineInfo::GetPCIeDMAMemory (unsigned nBus) const
 		if (nBus == PCIE_BUS_ONBOARD)
 		{
 			// TODO: for now we map only the second inbound window
-			pPCIePath = "/axi/pcie@120000";
-			n = 2*7;
+			pPCIePath = "/axi/pcie@1000120000";
+			n = 3*7;
 			i = 7;
 		}
 		else
 		{
 			assert (nBus == PCIE_BUS_EXTERNAL);
 			// there is one inbound window only
-			pPCIePath = "/axi/pcie@110000";
-			n = 1*7;
+			pPCIePath = "/axi/pcie@1000110000";
+			n = 2*7;
 			i = 0;
 		}
 #endif

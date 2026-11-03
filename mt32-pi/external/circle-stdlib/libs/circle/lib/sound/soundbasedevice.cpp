@@ -2,7 +2,7 @@
 // soundbasedevice.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2017-2023  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2017-2026  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -186,6 +186,17 @@ int CSoundBaseDevice::GetRangeMax (void) const
 	return m_nRangeMax;
 }
 
+void CSoundBaseDevice::Flush (void)
+{
+	m_SpinLock.Acquire ();
+	m_nOutPtr = m_nInPtr;
+	m_SpinLock.Release ();
+
+	m_ReadSpinLock.Acquire ();
+	m_nReadOutPtr = m_nReadInPtr;
+	m_ReadSpinLock.Release ();
+}
+
 // Output /////////////////////////////////////////////////////////////
 
 boolean CSoundBaseDevice::AllocateQueue (unsigned nSizeMsecs)
@@ -250,6 +261,10 @@ void CSoundBaseDevice::SetWriteFormat (TSoundFormat Format, unsigned nChannels)
 
 	case SoundFormatSigned24_32:
 		m_nWriteSampleSize = sizeof (s32);
+		break;
+
+	case SoundFormatFloat32:
+		m_nWriteSampleSize = sizeof (float);
 		break;
 
 	default:
@@ -478,6 +493,10 @@ void CSoundBaseDevice::SetReadFormat (TSoundFormat Format, unsigned nChannels,
 		m_nReadSampleSize = sizeof (s32);
 		break;
 
+	case SoundFormatFloat32:
+		m_nReadSampleSize = sizeof (float);
+		break;
+
 	default:
 		assert (0);
 		break;
@@ -699,6 +718,11 @@ void CSoundBaseDevice::ConvertSoundFormat (void *pTo, const void *pFrom)
 		const u32 *pValue = reinterpret_cast<const u32 *> (pFrom);
 		nValue = *pValue & 0xFFFFFF;
 		nValue <<= 8;
+		} break;
+
+	case SoundFormatFloat32: {
+		const float *pValue = reinterpret_cast<const float *> (pFrom);
+		nValue = static_cast<s32> (*pValue * 2147483647.0f);
 		} break;
 
 	case SoundFormatUnknown:
@@ -994,6 +1018,11 @@ void CSoundBaseDevice::ConvertReadSoundFormat (void *pTo, const void *pFrom)
 	case SoundFormatSigned24_32: {
 		u32 *pValue = reinterpret_cast<u32 *> (pTo);
 		*pValue = nValue;
+		} break;
+
+	case SoundFormatFloat32: {
+		float *pValue = reinterpret_cast<float *> (pTo);
+		*pValue = (float) (s32) (nValue << 8) / 0x80000000;
 		} break;
 
 	default:

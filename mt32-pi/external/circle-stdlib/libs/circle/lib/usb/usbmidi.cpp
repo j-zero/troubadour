@@ -5,7 +5,7 @@
 // 	Copyright (C) 2016  J. Otto <joshua.t.otto@gmail.com>
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2017-2023  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2017-2026  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -40,8 +40,58 @@ static const unsigned cin_to_length[] = {
 	0, 0, 2, 3, 3, 1, 2, 3, 3, 3, 3, 3, 2, 2, 3, 1
 };
 
-CUSBMIDIDevice::CUSBMIDIDevice (void)
-:	m_pPacketHandler (0),
+#ifdef USB_MIDI_CHECK_INCOMING
+
+static inline boolean IsMIDIDataByte (u8 uchByte)
+{
+	return uchByte < 0x80;
+}
+
+static boolean IsValidEventPacket (const u8 *pPacket)
+{
+	assert (pPacket != 0);
+
+	u8 nCIN = pPacket[0] & 0x0F;
+	if (cin_to_length[nCIN] == 0)
+	{
+		return FALSE;
+	}
+
+	switch (nCIN)
+	{
+	case 0x2:	// 2-byte system common
+		return    (pPacket[1] == 0xF1 || pPacket[1] == 0xF3)
+		       && IsMIDIDataByte (pPacket[2]);
+
+	case 0x3:	// 3-byte system common
+		return    pPacket[1] == 0xF2
+		       && IsMIDIDataByte (pPacket[2])
+		       && IsMIDIDataByte (pPacket[3]);
+
+	case 0x8:	// note off
+	case 0x9:	// note on
+	case 0xA:	// poly key pressure
+	case 0xB:	// control change
+	case 0xE:	// pitch bend
+		return    (pPacket[1] >> 4) == nCIN
+		       && IsMIDIDataByte (pPacket[2])
+		       && IsMIDIDataByte (pPacket[3]);
+
+	case 0xC:	// program change
+	case 0xD:	// channel pressure
+		return    (pPacket[1] >> 4) == nCIN
+		       && IsMIDIDataByte (pPacket[2]);
+
+	default:
+		return TRUE;
+	}
+}
+
+#endif
+
+CUSBMIDIDevice::CUSBMIDIDevice (CDevice *pParent)
+:	CDevice (pParent),
+	m_pPacketHandler (0),
 	m_pSendEventsHandler (0),
 	m_bAllSoundOff (FALSE),
 	m_nDeviceNumber (s_DeviceNumberPool.AllocateNumber (TRUE, FromMIDI))
@@ -88,11 +138,13 @@ boolean CUSBMIDIDevice::SendEventPackets (const u8 *pData, unsigned nLength)
 	return (*m_pSendEventsHandler) (pData, nLength, m_pSendEventsParam);
 }
 
-boolean CUSBMIDIDevice::SendPlainMIDI (unsigned nCable, const u8 *pData, unsigned nLength)
+boolean CUSBMIDIDevice::SendPlainMIDI (unsigned nCable, const u8 *pData, unsigned nLength,
+				       unsigned nChunkSize)
 {
 	assert (nCable <= 15);
 	assert (pData != 0);
 	assert (nLength > 0);
+	assert (nChunkSize % 4 == 0);
 
 	size_t nBufferSize = nLength * 4;		// worst case
 	size_t nBufferValid = 0;
@@ -222,7 +274,25 @@ boolean CUSBMIDIDevice::SendPlainMIDI (unsigned nCable, const u8 *pData, unsigne
 
 	//debug_hexdump (Buffer, nBufferValid, FromMIDI);
 
-	return SendEventPackets (Buffer, nBufferValid);
+	if (nChunkSize == 0)
+	{
+		return SendEventPackets (Buffer, nBufferValid);
+	}
+
+	for (pBuffer = Buffer; nBufferValid > 0; pBuffer += nChunkSize, nBufferValid -= nChunkSize)
+	{
+		if (nChunkSize > nBufferValid)
+		{
+			nChunkSize = nBufferValid;
+		}
+
+		if (!SendEventPackets (pBuffer, nChunkSize))
+		{
+			return FALSE;
+		}
+	}
+
+	return TRUE;
 }
 
 void CUSBMIDIDevice::SetAllSoundOffOnUSBError (boolean bEnable)
@@ -243,7 +313,11 @@ boolean CUSBMIDIDevice::CallPacketHandler (u8 *pData, unsigned nLength)
 		// Follow the Linux driver's example and ignore packets with Cable
 		// Number == Code Index Number == 0, which some devices seem to
 		// generate as padding in spite of their status as reserved.
-		if (pPacket[0] != 0)
+		if (   pPacket[0] != 0
+#ifdef USB_MIDI_CHECK_INCOMING
+		    && IsValidEventPacket (pPacket)
+#endif
+		   )
 		{
 			if (m_pPacketHandler != 0)
 			{

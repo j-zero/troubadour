@@ -4,58 +4,86 @@ Circle
 Overview
 --------
 
-Circle is a C++ bare metal programming environment for the Raspberry Pi. It should be usable on most existing models (tested on model A+, B, B+, on Raspberry Pi 2, 3, 4, 400, 5 and on Raspberry Pi Zero (2)), except on the Raspberry Pi Pico, which is not supported. It is not known, if it works on the Raspberry Pi 500 and on Compute Module 5. Circle provides several ready-tested [C++ classes](doc/classes.txt) and [add-on libraries](addon/README), which can be used to control different hardware features of the Raspberry Pi. Together with Circle there are delivered several [sample programs](sample/README), which demonstrate the use of its classes. Circle can be used to create 32-bit or 64-bit bare metal applications.
+Circle is a C++ bare metal programming environment for the Raspberry Pi. It should be usable on most existing models (see "Support Status" below). Circle provides several ready-tested [C++ classes](doc/classes.txt) and [add-on libraries](addon/README), which can be used to control different hardware features of the Raspberry Pi. Together with Circle there are delivered several [sample programs](sample/README), which demonstrate the use of its classes. Circle can be used to create 32-bit or 64-bit bare metal applications.
 
 Circle includes bigger (optional) third-party C-libraries for specific purposes in addon/ now. This is the reason why GitHub rates the project as a C-language-project. The main Circle libraries are written in C++ using classes instead. That's why it is called a C++ programming environment.
 
-Release 49.0.1
+Disclaimer
+----------
+
+Circle is a free open-source project created by makers for makers. Because it targets bare-metal systems and is developed without formal QA or access to every hardware variant, it may not work as expected in all environments.
+
+- **No warranty:** Circle is provided "as is" without any express or implied warranties, including merchantability, fitness for a particular purpose, or noninfringement.
+- **Limited testing:** Contributors and maintainers test to the best of their ability but do not operate a dedicated testing department and cannot validate Circle on every device, bootloader version, or model revision.
+- **User responsibility:** If you integrate Circle into a project - especially a commercial product (not recommended) - you are responsible for thoroughly testing the software in your target environment and for any consequences of its use.
+- **Source-only distribution:** We publish Circle only as source code; no official binary releases are provided.
+- **Risk acknowledgement:** By using Circle you acknowledge the residual risks associated with bare-metal development and accept responsibility for verifying suitability and safety for your use case.
+
+Release 51.1.1
 --------------
 
-This hotfix release solves the following issues:
+This hotfix release reverts a commit, which does not allow to use lld as the linker with Clang, which is planned to be used with circle-stdlib. Furthermore it comes with an additional sanity check for the 8BitDo gamepad drivers.
 
-* Download of firmware files in boot/ did not work any more.
-* LVGL library in addon/lvgl/ did not build on Windows.
-* "fgrep is obsolescent" warnings appeared on newer build host systems.
+Release 51.1
+------------
 
-The 49th Step
--------------
+This release comes with **support for the Official 5" and 7" Touchscreens (v1 and v2)** with DSI interface **on the Raspberry Pi 5** in [addon/rp1dsi/](addon/rp1dsi). This can be tested with *sample/28-touchscreen* and *addon/lvgl/sample*. You have to set the `DSI_DISPLAY` variable in the respective *Makefile* to use the DSI displays.
 
-This release comes with an improved dot-matrix display management. All driver classes for dot-matrix displays should be derived from the class `CDisplay` now. The old character display support for ST7789- and SSD1306-based displays is still available, but will be deprecated in a future version. Instead there is the new class `CTerminalDevice`, which implements a scrolling character terminal display for any display driver, which is derived from `CDisplay`. This class is also used to implement the class `CScreenDevice` now for the known terminal display on a firmware-driven frame buffer device. The following displays are currently supported by `CDisplay`-derived driver classes:
+Another attempt to **overcome the dropped USB MIDI events problem** on the Raspberry Pi 1-3 and Zero has been made. The *cmdline.txt* option `usbboost=` has been extended and gets a bit-masked decimal parameter now, where each bit 0-3 enables an option, which can help to fix such problems. See the [doc/cmdline.txt](doc/cmdline.txt) for a detailed description. `usbboost=15` enables all options, but does work only, when the USB MIDI controller is directly connected to the USB root port (without hub).
 
-* Firmware-driven frame buffer (`CBcmFrameBuffer`)
-* ST7789 SPI display (`CST7789Display`)
-* SSD1306 I2C display (`CSSD1306Display`)
-* ILI9341 SPI display (`CILI9341Display`)
-
-Beside the terminal support also the 2D graphics (`C2DGraphics`) and LVGL (`CLVGL`) support have been updated to work with all these displays. The 2D graphics support works with logical colors (`T2DColor`) now. There is a new class `C2DImage`, which manages the color conversion from logical to physical colors for 2D sprite images.
-
-Classes, which support the displaying of text on dot-matrix displays, allow the selection of the used font now. The default system font can by defined with system option `DEFAULT_FONT`.
-
-There is a new class `CWindowDisplay`, which allows to use multiple non-overlapping windows on a dot-matrix display. This is demonstrated in the multi-core program *sample/43-multiwindow*.
-
-*sample/08-usbkeyboard*, *sample/41-screenanimations* and *addon/lvgl/sample* have been updated for the new display management and support SPI and I2C displays too.
-
-There are a number of API breaking changes for the new display support, which are listed in [this article](https://github.com/rsta2/circle/discussions/380#discussioncomment-11417658).
+If you are using USB in FIQ mode on the Raspberry Pi 1-3 and Zero with the system option `USE_USB_FIQ`, you can try to enable the option `USB_MIDI_FIQ_COMPLETION` too to reduce the latency on delivering received MIDI events to the minimum. Your MIDI event packet handler must be able to run on `FIQ_LEVEL` in this case. Normally it runs on `IRQ_LEVEL`. Additionally you can define `USB_MIDI_CHECK_INCOMING` to validate incoming MIDI event packets, before calling the MIDI event packet handler.
 
 More news:
 
-* The external PCIe bus of the Raspberry Pi 5 can be accessed using the class `CBcmPCIeHostBridge` now. See the *test/pcie-external* for details. Interrupts from the external PCIe bus are available via the INTA pin at the IRQ number `ARM_IRQ_PCIE_EXT_HOST_INTA`.
-* A driver for XPT2046-based touchscreens has been added. See *test/xpt2046-touchscreen* for details.
-* The FatFs support has been updated to R0.15a + patch1.
-* The LVGL support has been updated to v9.2.2.
-* DMA channels are usable in different modes now. Before a DMA channel, which has been used for an asynchronous transfer, could not be used for synchronous transfers afterwards without re-initialization. The completion routine has to be set prior to each asynchronous transfer now.
+* A new log severity `LogTrace` for frequent trace messages is introduced. Messages with this severity can be generated with the macro `LOGTRACE()`. Log messages of this kind are only displayed, when the option `loglevel=5` is specified in the file *cmdline.txt* on the SD card.
+* A number of 8BitDo Xbox360 gamepads and keyboards is supported now.
+* Support for USB mice with generic HID interface (3-0-0) has been added.
+* FatFs has been updated to R0.16 with patch 2.
 
 Fixes:
 
-* The detection of WM8960-based I2S codecs did not work, when the I2C address was explicitly specified.
-* Commit ae00d9d8 in Step48 was leading to lost MIDI events with USB MIDI devices on the Raspberry Pi 1-3 and has been reverted. In the rare case that you are using an USB device, which has a MIDI interface and an other (e.g. HID) interface, and the device is directly connected to the root port without USB hub in-between (e.g. on Raspberry Pi Zero), you have to define the system option `USE_NAK_USB_FIX` now.
-* The MQTT client might have crashed after receiving a disconnect from peer before.
-* The check for the length, opcode and block number of incoming ACK packets in the TFTP daemon used an invalid logical operator. This could have caused receiving invalid files on read requests.
-* The HideLink THEC64 USB keyboard did not work before.
-* The initial LVGL mouse cursor was not centered on the Raspberry Pi 5.
-* The `configure` script and cFlashy can be used on macOS now. cFlashy caused a build error before on macOS.
+* An invalid handling of TCP ACK for fragmented modem sessions has been corrected. This also solved the issue of sending scrambled TCP data over low-speed/-quality network links.
+* A race condition in `CSynchronizationEvent::Wait()` has been fixed, which could cause lost wake events, when this method had been called from an IRQ handler.
+* A spurious hang caused by unexpected USB Disconnect events on cold boot has been fixed.
+* Hidden WLAN SSIDs are supported now. You have to add the `scan_ssid=1` option for the hidden SSID to the file *wpa_supplicant.conf*.
+* USB mass-storage gadget has speed auto-negotiation and a robust host reset/suspend handling now.
+* Fixed that WLAN was unable to connect to eero7 router.
 
-The recommended firmware version has been updated. The option `initial_turbo=0` has been added to the file *config.txt*, because newer firmware versions enable `initial_turbo=60` by default now, which can disturb the Circle device initialization.
+The 51st Step
+-------------
+
+This release offers a significantly improved implementation of the TCP/IP network stack. It supports TCP congestion control according to RFC 5681 with Fast Retransmit and Fast Recovery. Also the unnecessary copying of frames and data in the stack is largely prevented. This improves throughput very much, especially when a Raspberry Pi with 100 MBps Ethernet is connected to a Gigabit network.
+
+The socket API is nearly unchanged, but the new `MSG_MORE` flag can be specified, when calling `CSocket::Send()` on TCP sockets, which prevents the immediate delivery of received data on the receiver side, when more data follows. `CSocket::Bind()` can be called with port 0 to bind to an ephemeral port, which can be requested using `CSocket::GetOwnPort()`. `CSocket::SendTo()` without preceding `Bind()` or `Connect()` is allowed too, which automatically assigns an ephemeral port.
+
+Circle supports the extended C++ standard library support (LLVM libc++ port) in the [circle-stdlib](https://github.com/smuehlst/circle-stdlib) project in several ways (e.g. with the new `STDLIB_SUPPORT=4` level).
+
+The recommended toolchain to build Circle applications is now based on GCC 15.2.Rel1. See the link in the Build section! Circle is built with `-std=c++17` by default now. There are options for selecting C++14 (previous default) and C++20 for the `configure` tool, beside the new `--kernel-max-size`, `--clang` and `--kasan` options. Enter `./configure --help` for more info!
+
+The recommended firmware has been updated in *boot/*.
+
+More new features:
+
+* A `CDevice` instance can have property strings for vendor, product, serial number and function (e.g. the USB interface) now. These strings are assigned for all USB- and for NVMe devices, and can be used to distinguish devices of the same class. `CDeviceNameService::ListDevices()` can show these properties.
+* The system option `USE_GPIO_MANAGER_FIQ` has been added. When an application needs multiple FIQ-triggered GPIO interrupt pins, the class `CGPIOPinFIQ` cannot be used. It is also not possible to use `CGPIOPinFIQ` together with the class `CGPIOManager` to handle more GPIO pins with IRQ. Now one can define this option to enable `CGPIOManager` and all GPIO pins, which use an interrupt, to use the FIQ to reduce GPIO interrupt latency. The GPIO interrupt handler will run at `FIQ_LEVEL` then.
+* `CGPIOClock::StartRate()` can use fractional dividers on Raspberry 1-4. Before only integer dividers were supported. Now automatically a fractional divider will be used with MASH 1, if necessary.
+* The class `CPipe` (an unidirectional inter-process communication channel using
+a FIFO) and the methods `CMutex::TryAcquire()` and `CSemaphore::DownWithTimeout()` have been added to the scheduler library. `CSemaphore` objects can have the initial count of zero now. *test/pipe* demonstrates `CPipe`.
+* Sound devices allow writing and reading samples in the `SoundFormatFloat32` now. Samples must be of the data type `float` in the range \[-1.0 .. 1.0\] in this case. *sample/34-sounddevices* and *test/sound-controller* can be configured to use this.
+* The class `CPWMSoundBaseDevice` supports the M/S PWM mode, which is also the default now. This should lead to a better audio quality and suppresses hum, when the PWM signal is delivered via the GPIO header.
+* The class `CEMMCDevice` in [addon/SDCard](addon/SDCard) supports external SDIO breakout boards at GPIO22-27 now as device "emmc2" and "SD2:" in FatFs. This does work with the EMMC host only (not with `USE_SDHOST`). On the Raspberry Pi 4 and CM4 the class can be instantiated twice with different device selector parameter specified to the constructor.
+* A `CSSD1309Display` graphics-mode driver for the SSD1309 128x64 OLED display controller (I2C and SPI) has been added to [addon/display](addon/display).
+* A `CMCP23017` driver for the MCP23017 16-bit I2C GPIO expander has been added to the [addon/gpio](addon/gpio).
+* The MPU-6050 driver in [addon/sensor](addon/sensor) has been extended and returns a scaled acceleration and gyroscope output now. The acceleration and gyroscope range and digital low-pass filter bandwidth can be configured. The sample adds a graphics mode.
+* The serial bootloader images are much smaller now and are able to load kernel images of up to about 8 MB.
+
+A number of fixes have been applied:
+
+* `CGPIOClock::Stop()` was operating on the wrong clock. This caused a stop of the UART clock, when GPIOClock2 was started.
+* `CMachineInfo::GetClockRate()` now favors the firmware function `GET_CLOCK_RATE_MEASURED` over `GET_CLOCK_RATE`, which reported a wrong Core clock rate, when `CCPUThrottle` was used. The reported value is rounded to the closest MHz value.
+* The *cmdline.txt* option `wm8960tune=` has been added as a workaround. Add the given value to the fractional (K) part of PLL1 input/output frequency ratio (treated as 24-digit binary number) of the WM8960 Codec to suppress clicks/pops (range -10000 to 10000, default 0).
+* There have been multiple issues with the handling of TCP FIN packets, which were leading to a delayed termination of connections.
+* There was a problem found in the scheduler using KASan, which was accessing a task object after deleting it.
 
 Features
 --------
@@ -71,7 +99,7 @@ Circle supports the following features:
 |                       | Enables all CPU caches using the MMU                | x              |
 |                       | Interrupt support (IRQ and FIQ)                     | IRQ only       |
 |                       | Multi-core support (Raspberry Pi 2, 3 and 4)        | x              |
-|                       | Cooperative non-preemtive scheduler                 | x              |
+|                       | Cooperative non-preemptive scheduler                | x              |
 |                       | CPU clock rate management                           | x              |
 |                       | Clang/LLVM support (experimental)                   | x              |
 |                       |                                                     |                |
@@ -82,6 +110,7 @@ Circle supports the following features:
 |                       | Serial bootloader (by David Welch) included         | x              |
 |                       | Software profiling support (single-core)            | x              |
 |                       | QEMU support                                        |                |
+|                       | Kernel Address Sanitizer support                    | x              |
 |                       |                                                     |                |
 | SoC devices           | GPIO pins (with interrupt, Act LED) and clocks      | x              |
 |                       | Frame buffer (screen driver with escape sequences)  | limited        |
@@ -102,12 +131,13 @@ Circle supports the following features:
 |                       | HDMI sound output (without VCHIQ)                   | x              |
 |                       | Hardware random number generator                    | x              |
 |                       | Watchdog device                                     | x              |
-|                       | Official Raspberry Pi touch screen (v1 only)        |                |
+|                       | Official 7" Raspberry Pi touch screen (v1 only)     | 5" and 7" v1/2 |
 |                       | VCHIQ interface and audio service drivers           |                |
 |                       | BCM54213PE Gigabit Ethernet NIC of Raspberry Pi 4   |                |
 |                       | MACB / GEM Gigabit Ethernet NIC of Raspberry Pi 5   | x              |
 |                       | Wireless LAN access                                 | x              |
 |                       | Driver for XPT2046-based touch screens              | x              |
+|                       | NVMe SSD driver for Raspberry Pi 5 (experimental)   | x              |
 |                       |                                                     |                |
 | USB                   | Host controller interface (HCI) drivers             | x              |
 |                       | Standard hub driver (USB 2.0 only)                  | x              |
@@ -129,7 +159,7 @@ Circle supports the following features:
 | File systems          | Internal FAT driver (limited function)              | x              |
 |                       | FatFs driver (full function, by ChaN)               | x              |
 |                       |                                                     |                |
-| TCP/IP networking     | Protocols: ARP, IP, ICMP, UDP, TCP                  | x              |
+| TCP/IP networking     | Protocols: ARP, IP, ICMP, IGMP, UDP, TCP            | x              |
 |                       | Clients: DHCP, DNS, NTP, HTTP, Syslog, MQTT, mDNS   | x              |
 |                       | Servers: HTTP, TFTP                                 | x              |
 |                       | BSD-like C++ socket API                             | x              |
@@ -142,14 +172,48 @@ Circle supports the following features:
 |                       |                                                     |                |
 | Not supported         | Bluetooth                                           |                |
 
-Building
---------
+Support Status
+--------------
+
+This table lists the support status for the different Raspberry Pi models. Not listed models are not supported.
+
+| Model                   | Status           | Remarks                          |
+|-------------------------|------------------|----------------------------------|
+| Raspberry Pi Model A    | Should work      |                                  |
+| Raspberry Pi Model B R1 | Should work      |                                  |
+| Raspberry Pi Model B R2 | Tested           |                                  |
+| Raspberry Pi Model A+   | Tested           |                                  |
+| Raspberry Pi Model B+   | Tested           |                                  |
+|                         |                  |                                  |
+| Raspberry Pi Zero       | Tested           |                                  |
+| Raspberry Pi Zero W     | Tested           |                                  |
+| Raspberry Pi Zero 2 W   | Tested           | WLAN unknown for new revision    |
+|                         |                  |                                  |
+| Raspberry Pi 2 Model B  | Tested           |                                  |
+| Raspberry Pi 3 Model B  | Tested           |                                  |
+| Raspberry Pi 3 Model A+ | Tested           |                                  |
+| Raspberry Pi 3 Model B+ | Tested           |                                  |
+| Raspberry Pi 4 Model B  | Tested           |                                  |
+| Raspberry Pi 400        | Tested           |                                  |
+| Raspberry Pi 5          | Tested           | With BCM2712 C1 and D0 steppings |
+| Raspberry Pi 500        | Unknown          |                                  |
+|                         |                  |                                  |
+| Compute Module          | Reported to work | Unknown which devices work       |
+| Compute Module 3        | Should work      |                                  |
+| Compute Module 3+       | Reported to work | WLAN unknown                     |
+| Compute Module 4        | Tested           | WLAN unknown                     |
+| Compute Module 4S       | Unknown          |                                  |
+| Compute Module 5        | Reported to work | Unknown which devices work       |
+| Compute Module Zero     | Reported to work |                                  |
+
+Build
+-----
 
 > For building 64-bit applications (AArch64) see the next section.
 
 > Circle does not support 32-bit applications on the Raspberry Pi 5.
 
-This describes building on PC Linux. See the file [doc/windows-build.txt](doc/windows-build.txt) for information about building on Windows. If building for the Raspberry Pi 1 you need a [toolchain](http://elinux.org/Rpi_Software#ARM) for the ARM1176JZF core (with EABI support). For Raspberry Pi 2/3/4 you need a toolchain with Cortex-A7/-A53/-A72 support. A toolchain, which works for all of these, can be downloaded [here](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads). Circle has been tested with the version *13.2.Rel1* (arm-gnu-toolchain-13.2.rel1-x86_64-arm-none-eabi.tar.xz) from this website. This is the recommended toolchain for AArch32 builds.
+This describes building on PC Linux. See the file [doc/windows-build.txt](doc/windows-build.txt) for information about building on Windows. If building for the Raspberry Pi 1 you need a [toolchain](http://elinux.org/Rpi_Software#ARM) for the ARM1176JZF core (with EABI support). For Raspberry Pi 2/3/4 you need a toolchain with Cortex-A7/-A53/-A72 support. A toolchain, which works for all of these, can be downloaded [here](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads). Circle has been tested with the version *15.2.Rel1* (arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi.tar.xz) from this website. This is the recommended toolchain for AArch32 builds.
 
 First edit the file *Rules.mk* and set the Raspberry Pi version (*RASPPI*, 1, 2, 3 or 4) and the *PREFIX* of your toolchain commands. Alternatively you can create a *Config.mk* file (which is ignored by git) and set the Raspberry Pi version and the *PREFIX* variable to the prefix of your compiler like this (don't forget the dash at the end):
 
@@ -189,7 +253,7 @@ AArch64
 
 Circle supports building 64-bit applications, which can be run on the Raspberry Pi 3, 4 or 5. There are also Raspberry Pi 2 versions and the Raspberry Pi Zero 2, which are based on the BCM2837 SoC. These Raspberry Pi versions can be used too (with `RASPPI = 3`).
 
-The recommended toolchain to build 64-bit applications with Circle can be downloaded [here](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads). Circle has been tested with the version *13.2.Rel1* (arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz) from this website. This is the recommended toolchain for AArch64 builds.
+The recommended toolchain to build 64-bit applications with Circle can be downloaded [here](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads). Circle has been tested with the version *15.2.Rel1* (arm-gnu-toolchain-15.2.rel1-x86_64-aarch64-none-elf.tar.xz) from this website. This is the recommended toolchain for AArch64 builds.
 
 There are distro-provided toolchains on certain Linux platforms (e.g. *g++-aarch64-linux-gnu* on Ubuntu or *gcc-c++-aarch64-linux-gnu* on Fedora), which may work with Circle and can be a quick way to use it, but you have to test this by yourself. If you encounter problems (e.g. no reaction at all, link failure with external library) using a distro-provided toolchain, please try the recommended toolchain (see above) first, before reporting an issue.
 
@@ -239,19 +303,16 @@ Classes
 
 The following C++ classes were added to Circle:
 
-Base library
+Scheduler library
 
-* CDisplay: Base class for dot-matrix display drivers
-* CTerminalDevice: Terminal support for dot-matrix displays
-* CWindowDisplay: Non-overlapping window on a display
+* CPipe: Unidirectional interprocess communication channel using a FIFO
+* CPipeFile: Read or Write endpoint of a CPipe channel
+ 
+Net library
 
-USB library
-
-* CUSBFloppyDiskDevice: Driver for USB floppy disk devices (CBI transport)
-
-Input library
-
-* CXPT2046TouchScreen: Driver for XPT2046-based touch screens
+* CNetBuffer: Generic frame/packet buffer for network protocol handling
+* CNetBufferQueue: FIFO queue for CNetBuffer objects
+* CReassemblyQueue: Reassembly queue for the TCP receiver
 
 The available Circle classes are listed in the file [doc/classes.txt](doc/classes.txt). If you have Doxygen installed on your computer you can build a [class documentation](doc/html/index.html) in doc/html/ using:
 
@@ -280,6 +341,7 @@ Additional Topics
 * [Clang support](doc/clang-support.txt)
 * [Memory layout](doc/memorymap.txt)
 * [Naming conventions](doc/naming-conventions.txt)
+* [Address sanitizer](doc/kasan.txt)
 * [Known issues](doc/issues.txt)
 
 Trademarks

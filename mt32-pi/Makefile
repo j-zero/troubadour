@@ -8,10 +8,12 @@ include Config.mk
 .PHONY: submodules circle-stdlib fluidsynth all clean veryclean
 
 #
-# Functions to apply/reverse patches only if not completely applied/reversed already
+# Functions to apply/reverse patches only if not completely applied/reversed already (also checked with --binary, for
+# sources and patches that both have CRLF line endings, as in a Windows checkout)
 #
 APPLY_PATCH=sh -c '																\
-	if patch --dry-run --reverse --force --strip 1 --directory $$1 < $$2 >/dev/null 2>&1; then						\
+	if patch --dry-run --reverse --force --strip 1 --directory $$1 < $$2 >/dev/null 2>&1						\
+	   || patch --dry-run --binary --reverse --force --strip 1 --directory $$1 < $$2 >/dev/null 2>&1; then				\
 		echo "Patch $$2 already applied; skipping";											\
 	else																	\
 		echo "Applying patch $$2 to directory $$1...";											\
@@ -19,7 +21,8 @@ APPLY_PATCH=sh -c '																\
 	fi' APPLY_PATCH
 
 REVERSE_PATCH=sh -c '																\
-	if patch --dry-run --forward --force --strip 1 --directory $$1 < $$2 >/dev/null 2>&1; then						\
+	if patch --dry-run --forward --force --strip 1 --directory $$1 < $$2 >/dev/null 2>&1						\
+	   || patch --dry-run --binary --forward --force --strip 1 --directory $$1 < $$2 >/dev/null 2>&1; then				\
 		echo "Patch $$2 already reversed; skipping";											\
 	else																	\
 		echo "Reversing patch $$2 in directory $$1...";											\
@@ -40,6 +43,9 @@ submodules:
 $(CIRCLE_STDLIB_CONFIG) $(CIRCLE_CONFIG)&:
 	#patch config for mingw
 	@${APPLY_PATCH} $(CIRCLESTDLIBHOME) patches/circle-std-config-mingw.patch
+
+	# FatFs fast seek, which loading samples from large SoundFonts relies on (off by default since Circle Step 50)
+	@${APPLY_PATCH} $(CIRCLEHOME) patches/circle-fatfs-fastseek.patch
 	
 	@echo "Configuring for Raspberry Pi $(RASPBERRYPI) ($(BITS) bit)"
 	$(CIRCLESTDLIBHOME)/configure --raspberrypi=$(RASPBERRYPI) --prefix=$(PREFIX)
@@ -78,7 +84,8 @@ endif
 circle-stdlib: $(CIRCLESTDLIBHOME)/.done
 
 $(CIRCLESTDLIBHOME)/.done: $(CIRCLE_STDLIB_CONFIG)
-	@$(MAKE) -C $(CIRCLESTDLIBHOME)
+# newlib's documentation isn't needed, so texinfo doesn't have to be installed
+	@$(MAKE) -C $(CIRCLESTDLIBHOME) MAKEINFO=true
 	touch $@
 
 #

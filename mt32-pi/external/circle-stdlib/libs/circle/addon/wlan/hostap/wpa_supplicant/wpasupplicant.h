@@ -2,7 +2,7 @@
 // wpasupplicant.h
 //
 // WPA Supplicant wrapper class for Circle
-// by R. Stange <rsta2@o2online.de>
+// by R. Stange <rsta2@gmx.net>
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 2 as
@@ -26,7 +26,7 @@ public:
 
 	boolean Initialize (void);
 
-	boolean IsConnected (void) const;
+	static boolean IsConnected (void);
 
 private:
 	static void ProcEntry (void *pParam);

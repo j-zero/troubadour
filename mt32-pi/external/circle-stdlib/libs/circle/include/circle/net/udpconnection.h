@@ -2,7 +2,7 @@
 // udpconnection.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2015-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2015-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -25,7 +25,8 @@
 #include <circle/net/networklayer.h>
 #include <circle/net/ipaddress.h>
 #include <circle/net/icmphandler.h>
-#include <circle/net/netqueue.h>
+#include <circle/net/netbuffer.h>
+#include <circle/net/netbufferqueue.h>
 #include <circle/sched/synchronizationevent.h>
 #include <circle/types.h>
 
@@ -46,14 +47,21 @@ public:
 	int Accept (CIPAddress *pForeignIP, u16 *pForeignPort);
 	int Close (void);
 	
-	int Send (const void *pData, unsigned nLength, int nFlags);
-	int Receive (void *pBuffer, int nFlags);
+	int Send (CNetBuffer *pData, int nFlags);
+	int Receive (CNetBuffer **ppBuffer, int nFlags);
 
-	int SendTo (const void *pData, unsigned nLength, int nFlags,
+	int SendTo (CNetBuffer *pData, int nFlags,
 		    const CIPAddress &rForeignIP, u16 nForeignPort);
-	int ReceiveFrom (void *pBuffer, int nFlags, CIPAddress *pForeignIP, u16 *pForeignPort);
+	int ReceiveFrom (CNetBuffer **ppBuffer, int nFlags,
+			 CIPAddress *pForeignIP, u16 *pForeignPort);
+
+	int SetOptionReceiveTimeout (unsigned nMicroSeconds);
+	int SetOptionSendTimeout (unsigned nMicroSeconds);
 
 	int SetOptionBroadcast (boolean bAllowed);
+
+	int SetOptionAddMembership (const CIPAddress &rGroupAddress);
+	int SetOptionDropMembership (const CIPAddress &rGroupAddress);
 
 	boolean IsConnected (void) const;
 	boolean IsTerminated (void) const;
@@ -61,7 +69,7 @@ public:
 	void Process (void);
 
 	// returns: -1: invalid packet, 0: not to me, 1: packet consumed
-	int PacketReceived (const void *pPacket, unsigned nLength,
+	int PacketReceived (CNetBuffer *pPacket,
 			    CIPAddress &rSenderIP, CIPAddress &rReceiverIP, int nProtocol);
 
 	// returns: 0: not to me, 1: notification consumed
@@ -70,12 +78,16 @@ public:
 				  u16 nSendPort, u16 nReceivePort,
 				  int nProtocol);
 
+	TStatus GetStatus (void) const;
+
 private:
 	boolean m_bOpen;
 	boolean m_bActiveOpen;
-	CNetQueue m_RxQueue;
+	CNetBufferQueue m_RxQueue;
 	CSynchronizationEvent m_Event;
+	unsigned m_nReceiveTimeout;		// us
 	boolean m_bBroadcastsAllowed;
+	CIPAddress *m_pHostGroup;
 
 	int m_nErrno;				// signalize error to the user
 };

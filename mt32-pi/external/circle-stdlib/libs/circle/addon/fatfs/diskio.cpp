@@ -28,10 +28,12 @@
 static const char *s_pVolumeName[FF_VOLUMES] =
 {
 	"emmc1",
+	"emmc2",
 	"umsd1",
 	"umsd2",
 	"umsd3",
-	"ufd1"
+	"ufd1",
+	"nvme1"
 };
 
 static CDevice *s_pVolume[FF_VOLUMES] = {0};
@@ -257,6 +259,24 @@ DRESULT disk_ioctl (
 		return RES_OK;
 
 	case CTRL_SYNC:
+		{
+			if (pdrv >= FF_VOLUMES)
+			{
+				return RES_PARERR;
+			}
+
+			CDevice *pDevice =
+				CDeviceNameService::Get ()->GetDevice (s_pVolumeName[pdrv], TRUE);
+			if (pDevice != 0)
+			{
+				/* This fails, if unsupported, so ignore eventual errors. */
+				pDevice->IOCtl (DEVICE_IOCTL_SYNC, 0);
+			}
+			else
+			{
+				return RES_NOTRDY;
+			}
+		}
 		return RES_OK;
 
 	case GET_SECTOR_SIZE:

@@ -2,7 +2,7 @@
 // util.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -36,7 +36,10 @@ void *memmove (void *pDest, const void *pSrc, size_t nLength);
 
 int memcmp (const void *pBuffer1, const void *pBuffer2, size_t nLength);
 
+void *memmem (const void *pHaystack, size_t haystackLength, const void *pNeedle, size_t needleLength);
+
 size_t strlen (const char *pString);
+size_t strnlen (const char *pString, size_t nMaxLen);
 
 int strcmp (const char *pString1, const char *pString2);
 int strcasecmp (const char *pString1, const char *pString2);
@@ -85,6 +88,8 @@ u32 bswap32 (u32 ulValue);
 #else
 	#define parity32	__builtin_parity
 #endif
+
+u32 ether_crc (size_t nLength, const unsigned char *pData);
 
 #ifdef __cplusplus
 }

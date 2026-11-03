@@ -2,7 +2,7 @@
 // usbmouse.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2014-2021  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2014-2026  R. Stange <rsta2@gmx.net>
 //
 // USB mouse wheel support including HID report parser:
 // Copyright (C) 2020  H. Kocevar <hinxx@protonmail.com>
@@ -106,7 +106,7 @@ boolean CUSBMouseDevice::Configure (void)
 
 	
 	m_pMouseDevice = new CMouseDevice(m_MouseReport.items[MouseItemButtons].bitSize,
-					  m_MouseReport.items[MouseItemWheel].bitSize != 0);
+					  m_MouseReport.items[MouseItemWheel].bitSize != 0, this);
 	assert (m_pMouseDevice != 0);
 
 	return StartRequest ();
@@ -181,7 +181,9 @@ u32 CUSBMouseDevice::ExtractUnsigned(const void *buffer, u32 offset, u32 length)
 	unsigned shift = offset % 8;
 	offset = offset / 8;
 	bits = bits + offset;
-	unsigned number = *(unsigned *)bits;
+	unsigned number = bits[0];
+	if (length > 8) number |= (u16) bits[1] << 8;
+	if (length > 16) number |= (u32) bits[2] << 16;
 	offset = shift;
 
 	unsigned result = 0;
@@ -189,8 +191,10 @@ u32 CUSBMouseDevice::ExtractUnsigned(const void *buffer, u32 offset, u32 length)
 	{
 		result = (((1 << 24) - 1) & (number >> offset));
 		bits = bits + 3;
-		number = *(unsigned *)bits;
 		length = length - 24;
+		number = bits[0];
+		if (length > 8) number |= (u16) bits[1] << 8;
+		if (length > 16) number |= (u32) bits[2] << 16;
 		unsigned result2 = (((1 << length) - 1) & (number >> offset));
 		result = (result2 << 24) | result;
 	}

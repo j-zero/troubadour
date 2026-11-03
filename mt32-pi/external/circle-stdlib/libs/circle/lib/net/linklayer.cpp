@@ -2,7 +2,7 @@
 // linklayer.cpp
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2015-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2015-2025  R. Stange <rsta2@gmx.net>
 // 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,23 +19,25 @@
 //
 #include <circle/net/linklayer.h>
 #include <circle/net/networklayer.h>
+#include <circle/net/netbuffer.h>
 #include <circle/util.h>
 #include <assert.h>
-
-struct TRawPrivateData
-{
-	u8	MACSender[MAC_ADDRESS_SIZE];
-};
 
 CLinkLayer::CLinkLayer (CNetConfig *pNetConfig, CNetDeviceLayer *pNetDevLayer)
 :	m_pNetConfig (pNetConfig),
 	m_pNetDevLayer (pNetDevLayer),
 	m_pNetworkLayer (0),
 	m_pARPHandler (0),
+	m_IPRxQueue (TRUE),
 	m_nRawProtocolType (0)
 {
 	assert (m_pNetConfig != 0);
 	assert (m_pNetDevLayer != 0);
+
+	for (unsigned i = 0; i < MaxGroups; i++)
+	{
+		m_nMulticastUseCounter[i] = 0;
+	}
 }
 
 CLinkLayer::~CLinkLayer (void)
@@ -74,46 +76,72 @@ void CLinkLayer::Process (void)
 	}
 
 	assert (m_pNetDevLayer != 0);
-	u8 Buffer[FRAME_BUFFER_SIZE];
-	unsigned nLength;
-	while (m_pNetDevLayer->Receive (Buffer, &nLength))
+	CNetBuffer *pNetBuffer;
+	while ((pNetBuffer = m_pNetDevLayer->Receive ()) != 0)
 	{
+		size_t nLength = pNetBuffer->GetLength ();
 		assert (nLength <= FRAME_BUFFER_SIZE);
 		if (nLength <= sizeof (TEthernetHeader))
 		{
+			delete pNetBuffer;
+
 			continue;
 		}
-		TEthernetHeader *pHeader = (TEthernetHeader *) Buffer;
+
+		TEthernetHeader *pHeader = (TEthernetHeader *) pNetBuffer->GetPtr ();
+		assert (pHeader != 0);
 
 		CMACAddress MACAddressReceiver (pHeader->MACReceiver);
 		if (    MACAddressReceiver != *pOwnMACAddress
 		    && !MACAddressReceiver.IsBroadcast ())
 		{
-			continue;
+			if (!MACAddressReceiver.IsMulticast ())
+			{
+				delete pNetBuffer;
+
+				continue;
+			}
+
+			unsigned i;
+			for (i = 0; i < MaxGroups; i++)
+			{
+				if (   m_nMulticastUseCounter[i] > 0
+				    && m_MulticastGroup[i] == MACAddressReceiver)
+				{
+					break;
+				}
+			}
+
+			if (i == MaxGroups)
+			{
+				delete pNetBuffer;
+
+				continue;
+			}
 		}
 
-		nLength -= sizeof (TEthernetHeader);
-		assert (nLength > 0);
-		
+		pNetBuffer->RemoveHeader (sizeof (TEthernetHeader));
+
 		switch (pHeader->nProtocolType)
 		{
 		case BE (ETH_PROT_IP):
-			m_IPRxQueue.Enqueue (Buffer+sizeof (TEthernetHeader), nLength);
+			m_IPRxQueue.Enqueue (pNetBuffer);
 			break;
 
 		case BE (ETH_PROT_ARP):
-			m_ARPRxQueue.Enqueue (Buffer+sizeof (TEthernetHeader), nLength);
+			m_ARPRxQueue.Enqueue (pNetBuffer);
 			break;
 
 		default:
 			if (pHeader->nProtocolType == m_nRawProtocolType)
 			{
-				TRawPrivateData *pParam = new TRawPrivateData;
-				assert (pParam != 0);
-				memcpy (pParam->MACSender, pHeader->MACSender, MAC_ADDRESS_SIZE);
+				pNetBuffer->SetPrivateData (pHeader->MACSender, MAC_ADDRESS_SIZE);
 
-				m_RawRxQueue.Enqueue (Buffer+sizeof (TEthernetHeader),
-						      nLength, pParam);
+				m_RawRxQueue.Enqueue (pNetBuffer);
+			}
+			else
+			{
+				delete pNetBuffer;
 			}
 			break;
 		}
@@ -123,28 +151,27 @@ void CLinkLayer::Process (void)
 	m_pARPHandler->Process ();
 }
 
-boolean CLinkLayer::Send (const CIPAddress &rReceiver, const void *pIPPacket, unsigned nLength)
+boolean CLinkLayer::Send (const CIPAddress &rReceiver, CNetBuffer *pNetBuffer)
 {
-	unsigned nFrameLength = sizeof (TEthernetHeader) + nLength;	// may wrap
+	assert (pNetBuffer != 0);
+	unsigned nFrameLength = sizeof (TEthernetHeader) + pNetBuffer->GetLength ();	// may wrap
 	if (   nFrameLength <= sizeof (TEthernetHeader)
 	    || nFrameLength > FRAME_BUFFER_SIZE)
 	{
 		return FALSE;
 	}
 
-	assert (pIPPacket != 0);
-	assert (nLength > 0);
 	assert (m_pNetConfig != 0);
 	if (   !rReceiver.IsNull ()
 	    && rReceiver == *m_pNetConfig->GetIPAddress ())
 	{
-		m_IPRxQueue.Enqueue (pIPPacket, nLength);	// loop back to own address
+		m_IPRxQueue.Enqueue (pNetBuffer);	// loop back to own address
 
 		return TRUE;
 	}
 
-	u8 FrameBuffer[nFrameLength];
-	TEthernetHeader *pHeader = (TEthernetHeader *) FrameBuffer;
+	TEthernetHeader *pHeader =
+		(TEthernetHeader *) pNetBuffer->AddHeader (sizeof (TEthernetHeader));
 
 	assert (m_pNetDevLayer != 0);
 	const CMACAddress *pOwnMACAddress = m_pNetDevLayer->GetMACAddress ();
@@ -153,7 +180,10 @@ boolean CLinkLayer::Send (const CIPAddress &rReceiver, const void *pIPPacket, un
 
 	pHeader->nProtocolType = BE (ETH_PROT_IP);
 
-	memcpy (FrameBuffer+sizeof (TEthernetHeader), pIPPacket, nLength);
+	if (nFrameLength < ETH_MIN_LEN)
+	{
+		pNetBuffer->AddPadding (ETH_MIN_LEN - nFrameLength);
+	}
 
 	assert (m_pARPHandler != 0);
 	CMACAddress MACAddressReceiver;
@@ -164,67 +194,58 @@ boolean CLinkLayer::Send (const CIPAddress &rReceiver, const void *pIPPacket, un
 	}
 	else if (rReceiver.IsMulticast ())
 	{
-		u8 TempMACAddress[MAC_ADDRESS_SIZE];
-		rReceiver.CopyTo (TempMACAddress + 2);
-
-		TempMACAddress[0] = 0x01;
-		TempMACAddress[1] = 0x00;
-		TempMACAddress[2] = 0x5E;
-
-		MACAddressReceiver.Set (TempMACAddress);
+		MACAddressReceiver.SetMulticast (rReceiver.Get ());
 	}
-	else if (!m_pARPHandler->Resolve (rReceiver, &MACAddressReceiver,
-					  FrameBuffer, nFrameLength))
+	else if (!m_pARPHandler->Resolve (rReceiver, &MACAddressReceiver, pNetBuffer))
 	{
 		return TRUE;		// packet will be retransmitted by ARP handler
 	}
 
 	MACAddressReceiver.CopyTo (pHeader->MACReceiver);
 
-	m_pNetDevLayer->Send (FrameBuffer, nFrameLength);
+	m_pNetDevLayer->Send (pNetBuffer);
 
 	return TRUE;
 }
 
-boolean CLinkLayer::Receive (void *pBuffer, unsigned *pResultLength)
+CNetBuffer *CLinkLayer::Receive (void)
 {
-	assert (pBuffer != 0);
-	assert (pResultLength != 0);
-	*pResultLength = m_IPRxQueue.Dequeue (pBuffer);
-
-	return *pResultLength != 0 ? TRUE : FALSE;
+	return m_IPRxQueue.Dequeue ();
 }
 
 boolean CLinkLayer::SendRaw (const void *pFrame, unsigned nLength)
 {
 	assert (pFrame != 0);
 	assert (nLength > 0);
+	CNetBuffer *pNetBuffer = new CNetBuffer (CNetBuffer::LLRawSend, nLength, pFrame);
+	assert (pNetBuffer != 0);
+
 	assert (m_pNetDevLayer != 0);
-	m_pNetDevLayer->Send (pFrame, nLength);
+	m_pNetDevLayer->Send (pNetBuffer);
 
 	return TRUE;
 }
 
 boolean CLinkLayer::ReceiveRaw (void *pBuffer, unsigned *pResultLength, CMACAddress *pSender)
 {
-	void *pParam;
-	assert (pBuffer != 0);
-	assert (pResultLength != 0);
-	*pResultLength = m_RawRxQueue.Dequeue (pBuffer, &pParam);
-	if (*pResultLength == 0)
+	CNetBuffer *pNetBuffer = m_RawRxQueue.Dequeue ();
+	if (pNetBuffer == 0)
 	{
 		return FALSE;
 	}
 
-	TRawPrivateData *pData = (TRawPrivateData *) pParam;
+	assert (pResultLength != 0);
+	*pResultLength = pNetBuffer->GetLength ();
 
 	if (pSender != 0)
 	{
-		assert (pData != 0);
-		pSender->Set (pData->MACSender);
+		pSender->Set ((const u8 *) pNetBuffer->GetPrivateData ());
 	}
 
-	delete pData;
+	assert (pBuffer != 0);
+	memcpy (pBuffer, pNetBuffer->GetPtr (), pNetBuffer->GetLength ());
+
+	delete pNetBuffer;
 
 	return TRUE;
 }
@@ -242,13 +263,93 @@ boolean CLinkLayer::EnableReceiveRaw (u16 nProtocolType)
 	return TRUE;
 }
 
-void CLinkLayer::ResolveFailed (const void *pReturnedFrame, unsigned nLength)
+boolean CLinkLayer::IsRunning (void) const
+{
+	assert (m_pNetDevLayer != 0);
+	return m_pNetDevLayer->IsRunning ();
+}
+
+boolean CLinkLayer::JoinLocalGroup (const CIPAddress &rGroupAddress)
+{
+	CMACAddress Group;
+	Group.SetMulticast (rGroupAddress.Get ());
+
+	unsigned j = MaxGroups;
+	for (unsigned i = 0; i < MaxGroups; i++)
+	{
+		if (m_nMulticastUseCounter[i] == 0)
+		{
+			if (j == MaxGroups)
+			{
+				j = i;
+			}
+
+			continue;
+		}
+
+		if (m_MulticastGroup[i] == Group)
+		{
+			m_nMulticastUseCounter[i]++;
+
+			return TRUE;
+		}
+	}
+
+	if (j == MaxGroups)
+	{
+		return FALSE;
+	}
+
+	m_MulticastGroup[j].Set (Group.Get ());
+	m_nMulticastUseCounter[j]++;
+
+	return UpdateMulticastFilter ();
+}
+
+boolean CLinkLayer::LeaveLocalGroup (const CIPAddress &rGroupAddress)
+{
+	CMACAddress Group;
+	Group.SetMulticast (rGroupAddress.Get ());
+
+	for (unsigned i = 0; i < MaxGroups; i++)
+	{
+		if (   m_nMulticastUseCounter[i] > 0
+		    && m_MulticastGroup[i] == Group)
+		{
+			if (--m_nMulticastUseCounter[i] > 0)
+			{
+				return TRUE;
+			}
+
+			return UpdateMulticastFilter ();
+		}
+	}
+
+	return FALSE;
+}
+
+boolean CLinkLayer::UpdateMulticastFilter (void)
+{
+	u8 Groups[MaxGroups+1][MAC_ADDRESS_SIZE];
+	memset (Groups, 0, sizeof Groups);
+
+	for (unsigned i = 0; i < MaxGroups; i++)
+	{
+		if (m_nMulticastUseCounter[i] > 0)
+		{
+			m_MulticastGroup[i].CopyTo (Groups[i]);
+		}
+	}
+
+	assert (m_pNetDevLayer != 0);
+	return m_pNetDevLayer->SetMulticastFilter (Groups);
+}
+
+void CLinkLayer::ResolveFailed (CNetBuffer *pReturnedFrame)
 {
 	assert (pReturnedFrame != 0);
-	assert (nLength > sizeof (TEthernetHeader));
-	assert (m_pNetworkLayer != 0);
+	pReturnedFrame->RemoveHeader (sizeof (TEthernetHeader));
 
-	m_pNetworkLayer->SendFailed (ICMP_CODE_DEST_HOST_UNREACH,
-				     (const u8 *) pReturnedFrame + sizeof (TEthernetHeader),
-				     nLength - sizeof (TEthernetHeader));
+	assert (m_pNetworkLayer != 0);
+	m_pNetworkLayer->SendFailed (ICMP_CODE_DEST_HOST_UNREACH, pReturnedFrame);
 }

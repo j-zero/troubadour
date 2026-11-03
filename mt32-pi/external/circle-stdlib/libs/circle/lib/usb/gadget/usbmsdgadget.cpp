@@ -4,7 +4,7 @@
 // USB Mass Storage Gadget by Mike Messinides
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2023-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2023-2025  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -31,7 +31,7 @@
 #define MLOGERR(From,...)		CLogger::Get ()->Write (From, LogError,__VA_ARGS__)
 #define DEFAULT_BLOCKS 16000
 
-const TUSBDeviceDescriptor CUSBMSDGadget::s_DeviceDescriptor =
+TUSBDeviceDescriptor CUSBMSDGadget::s_DeviceDescriptor =
 {
 	sizeof (TUSBDeviceDescriptor),
 	DESCRIPTOR_DEVICE,
@@ -93,11 +93,15 @@ const char *const CUSBMSDGadget::s_StringDescriptor[] =
 	"Mass Storage Gadget"
 };
 
-CUSBMSDGadget::CUSBMSDGadget (CInterruptSystem *pInterruptSystem, CDevice *pDevice)
+CUSBMSDGadget::CUSBMSDGadget (CInterruptSystem *pInterruptSystem, CDevice *pDevice,
+			      u16 usVendorID, u16 usProductID)
 :	CDWUSBGadget (pInterruptSystem, HighSpeed),
 	m_pDevice (pDevice),
-	m_pEP {nullptr, nullptr, nullptr}
+	m_pEP {nullptr, nullptr, nullptr},
+	m_ConfigurationDescriptor (s_ConfigurationDescriptor)
 {
+	s_DeviceDescriptor.idVendor = usVendorID;
+	s_DeviceDescriptor.idProduct = usProductID;
 	if(pDevice)SetDevice(pDevice);
 }
 
@@ -125,8 +129,8 @@ const void *CUSBMSDGadget::GetDescriptor (u16 wValue, u16 wIndex, size_t *pLengt
 	case DESCRIPTOR_CONFIGURATION:
 		if (!uchDescIndex)
 		{
-			*pLength = sizeof s_ConfigurationDescriptor;
-			return &s_ConfigurationDescriptor;
+			*pLength = sizeof m_ConfigurationDescriptor;
+			return &m_ConfigurationDescriptor;
 		}
 		break;
 
@@ -155,16 +159,50 @@ void CUSBMSDGadget::AddEndpoints (void)
 	assert (!m_pEP[EPOut]);
 	m_pEP[EPOut] = new CUSBMSDGadgetEndpoint (
 				reinterpret_cast<const TUSBEndpointDescriptor *> (
-					&s_ConfigurationDescriptor.EndpointOut), this);
+					&m_ConfigurationDescriptor.EndpointOut), this);
 	assert (m_pEP[EPOut]);
 
 	assert (!m_pEP[EPIn]);
 	m_pEP[EPIn] = new CUSBMSDGadgetEndpoint (
 				reinterpret_cast<const TUSBEndpointDescriptor *> (
-					&s_ConfigurationDescriptor.EndpointIn), this);
+					&m_ConfigurationDescriptor.EndpointIn), this);
 	assert (m_pEP[EPIn]);
 
 	m_nState=TMSDState::Init;
+}
+
+// Called on every "enumeration done" with the speed the host actually
+// negotiated. If it differs from the speed currently presented (e.g.
+// full-speed-only host or hub), adapt the bulk max packet size (64 bytes
+// at full-speed, 512 bytes at high-speed) in the configuration descriptor
+// and in the EP hardware.
+void CUSBMSDGadget::OnNegotiatedSpeed (TDeviceSpeed Speed)
+{
+	if (Speed == DeviceSpeedUnknown)
+	{
+		return;
+	}
+
+	u16 usMaxPacketSize = Speed == FullSpeed ? 64 : 512;
+	if (usMaxPacketSize == m_ConfigurationDescriptor.EndpointIn.wMaxPacketSize)
+	{
+		return;		// negotiated speed matches what we present
+	}
+
+	m_ConfigurationDescriptor.EndpointIn.wMaxPacketSize = usMaxPacketSize;
+	m_ConfigurationDescriptor.EndpointOut.wMaxPacketSize = usMaxPacketSize;
+
+	if (m_pEP[EPIn])
+	{
+		m_pEP[EPIn]->SetMaxPacketSize (usMaxPacketSize);
+	}
+
+	if (m_pEP[EPOut])
+	{
+		m_pEP[EPOut]->SetMaxPacketSize (usMaxPacketSize);
+	}
+
+	MLOGNOTE("OnNegotiatedSpeed","bulk max packet size now %u",(unsigned) usMaxPacketSize);
 }
 
 //must set device before usb activation
@@ -263,8 +301,12 @@ void CUSBMSDGadget::OnTransferComplete (boolean bIn, size_t nLength)
 		case TMSDState::SentCSW:
 			{
 				m_nState=TMSDState::ReceiveCBW;
+				// request max packet size bytes, because hosts may pad
+				// the CBW to the packet boundary
 				m_pEP[EPOut]->BeginTransfer(CUSBMSDGadgetEndpoint::TransferCBWOut,
-				                            m_OutBuffer,SIZE_CBW);
+				                            m_OutBuffer,
+				                            m_ConfigurationDescriptor
+				                            	.EndpointOut.wMaxPacketSize);
 				break;
 			}
 		case TMSDState::DataIn:
@@ -310,7 +352,7 @@ void CUSBMSDGadget::OnTransferComplete (boolean bIn, size_t nLength)
 		{
 		case TMSDState::ReceiveCBW:
 			{
-				if(nLength != SIZE_CBW)
+				if(nLength < SIZE_CBW)
 				{
 					MLOGERR("ReceiveCBW","Invalid CBW len = %i",nLength);
 					m_pEP[EPIn]->StallRequest(true);
@@ -368,7 +410,17 @@ void CUSBMSDGadget::OnActivate()
 	MLOGNOTE("MSD OnActivate", "state = %i",m_nState);
 	m_MSDReady=true;
 	m_nState=TMSDState::ReceiveCBW;
-	m_pEP[EPOut]->BeginTransfer(CUSBMSDGadgetEndpoint::TransferCBWOut,m_OutBuffer,SIZE_CBW);
+	// request max packet size bytes, because hosts may pad the CBW to the packet boundary
+	m_pEP[EPOut]->BeginTransfer(CUSBMSDGadgetEndpoint::TransferCBWOut,m_OutBuffer,
+				    m_ConfigurationDescriptor.EndpointOut.wMaxPacketSize);
+}
+
+void CUSBMSDGadget::OnDeactivate()
+{
+	MLOGNOTE("MSD OnDeactivate", "state = %i",m_nState);
+	m_MSDReady=false;
+	m_nState=TMSDState::Init;
+	m_pEP[EPOut]->CancelTransfer();
 }
 
 void CUSBMSDGadget::SendCSW()

@@ -3,8 +3,149 @@ Change Log
 
 This file contains the release notes (the major changes) since Circle Step30 for quick access. For earlier releases please checkout the respective git tag and look into README.md. More info is attached to the release tags (git cat-file tag StepNN) and is available in the git commit log.
 
+Release 51.1.1
+--------------
+
+This hotfix release reverts a commit, which does not allow to use lld as the linker with Clang, which is planned to be used with circle-stdlib. Furthermore it comes with an additional sanity check for the 8BitDo gamepad drivers.
+
+Release 51.1
+------------
+
+2026-09-22
+
+This release comes with **support for the Official 5" and 7" Touchscreens (v1 and v2)** with DSI interface **on the Raspberry Pi 5** in [addon/rp1dsi/](addon/rp1dsi). This can be tested with *sample/28-touchscreen* and *addon/lvgl/sample*. You have to set the `DSI_DISPLAY` variable in the respective *Makefile* to use the DSI displays.
+
+Another attempt to **overcome the dropped USB MIDI events problem** on the Raspberry Pi 1-3 and Zero has been made. The *cmdline.txt* option `usbboost=` has been extended and gets a bit-masked decimal parameter now, where each bit 0-3 enables an option, which can help to fix such problems. See the [doc/cmdline.txt](doc/cmdline.txt) for a detailed description. `usbboost=15` enables all options, but does work only, when the USB MIDI controller is directly connected to the USB root port (without hub).
+
+If you are using USB in FIQ mode on the Raspberry Pi 1-3 and Zero with the system option `USE_USB_FIQ`, you can try to enable the option `USB_MIDI_FIQ_COMPLETION` too to reduce the latency on delivering received MIDI events to the minimum. Your MIDI event packet handler must be able to run on `FIQ_LEVEL` in this case. Normally it runs on `IRQ_LEVEL`. Additionally you can define `USB_MIDI_CHECK_INCOMING` to validate incoming MIDI event packets, before calling the MIDI event packet handler.
+
+More news:
+
+* A new log severity `LogTrace` for frequent trace messages is introduced. Messages with this severity can be generated with the macro `LOGTRACE()`. Log messages of this kind are only displayed, when the option `loglevel=5` is specified in the file *cmdline.txt* on the SD card.
+* A number of 8BitDo Xbox360 gamepads and keyboards is supported now.
+* Support for USB mice with generic HID interface (3-0-0) has been added.
+* FatFs has been updated to R0.16 with patch 2.
+
+Fixes:
+
+* An invalid handling of TCP ACK for fragmented modem sessions has been corrected. This also solved the issue of sending scrambled TCP data over low-speed/-quality network links.
+* A race condition in `CSynchronizationEvent::Wait()` has been fixed, which could cause lost wake events, when this method had been called from an IRQ handler.
+* A spurious hang caused by unexpected USB Disconnect events on cold boot has been fixed.
+* Hidden WLAN SSIDs are supported now. You have to add the `scan_ssid=1` option for the hidden SSID to the file *wpa_supplicant.conf*.
+* USB mass-storage gadget has speed auto-negotiation and a robust host reset/suspend handling now.
+* Fixed that WLAN was unable to connect to eero7 router.
+
+The 51st Step
+-------------
+
+2026-05-05
+
+This release offers a significantly improved implementation of the TCP/IP network stack. It supports TCP congestion control according to RFC 5681 with Fast Retransmit and Fast Recovery. Also the unnecessary copying of frames and data in the stack is largely prevented. This improves throughput very much, especially when a Raspberry Pi with 100 MBps Ethernet is connected to a Gigabit network.
+
+The socket API is nearly unchanged, but the new `MSG_MORE` flag can be specified, when calling `CSocket::Send()` on TCP sockets, which prevents the immediate delivery of received data on the receiver side, when more data follows. `CSocket::Bind()` can be called with port 0 to bind to an ephemeral port, which can be requested using `CSocket::GetOwnPort()`. `CSocket::SendTo()` without preceding `Bind()` or `Connect()` is allowed too, which automatically assigns an ephemeral port.
+
+Circle supports the extended C++ standard library support (LLVM libc++ port) in the [circle-stdlib](https://github.com/smuehlst/circle-stdlib) project in several ways (e.g. with the new `STDLIB_SUPPORT=4` level).
+
+The recommended toolchain to build Circle applications is now based on GCC 15.2.Rel1. See the link in the Build section! Circle is built with `-std=c++17` by default now. There are options for selecting C++14 (previous default) and C++20 for the `configure` tool, beside the new `--kernel-max-size`, `--clang` and `--kasan` options. Enter `./configure --help` for more info!
+
+The recommended firmware has been updated in *boot/*.
+
+More new features:
+
+* A `CDevice` instance can have property strings for vendor, product, serial number and function (e.g. the USB interface) now. These strings are assigned for all USB- and for NVMe devices, and can be used to distinguish devices of the same class. `CDeviceNameService::ListDevices()` can show these properties.
+* The system option `USE_GPIO_MANAGER_FIQ` has been added. When an application needs multiple FIQ-triggered GPIO interrupt pins, the class `CGPIOPinFIQ` cannot be used. It is also not possible to use `CGPIOPinFIQ` together with the class `CGPIOManager` to handle more GPIO pins with IRQ. Now one can define this option to enable `CGPIOManager` and all GPIO pins, which use an interrupt, to use the FIQ to reduce GPIO interrupt latency. The GPIO interrupt handler will run at `FIQ_LEVEL` then.
+* `CGPIOClock::StartRate()` can use fractional dividers on Raspberry 1-4. Before only integer dividers were supported. Now automatically a fractional divider will be used with MASH 1, if necessary.
+* The class `CPipe` (an unidirectional inter-process communication channel using
+a FIFO) and the methods `CMutex::TryAcquire()` and `CSemaphore::DownWithTimeout()` have been added to the scheduler library. `CSemaphore` objects can have the initial count of zero now. *test/pipe* demonstrates `CPipe`.
+* Sound devices allow writing and reading samples in the `SoundFormatFloat32` now. Samples must be of the data type `float` in the range \[-1.0 .. 1.0\] in this case. *sample/34-sounddevices* and *test/sound-controller* can be configured to use this.
+* The class `CPWMSoundBaseDevice` supports the M/S PWM mode, which is also the default now. This should lead to a better audio quality and suppresses hum, when the PWM signal is delivered via the GPIO header.
+* The class `CEMMCDevice` in [addon/SDCard](addon/SDCard) supports external SDIO breakout boards at GPIO22-27 now as device "emmc2" and "SD2:" in FatFs. This does work with the EMMC host only (not with `USE_SDHOST`). On the Raspberry Pi 4 and CM4 the class can be instantiated twice with different device selector parameter specified to the constructor.
+* A `CSSD1309Display` graphics-mode driver for the SSD1309 128x64 OLED display controller (I2C and SPI) has been added to [addon/display](addon/display).
+* A `CMCP23017` driver for the MCP23017 16-bit I2C GPIO expander has been added to the [addon/gpio](addon/gpio).
+* The MPU-6050 driver in [addon/sensor](addon/sensor) has been extended and returns a scaled acceleration and gyroscope output now. The acceleration and gyroscope range and digital low-pass filter bandwidth can be configured. The sample adds a graphics mode.
+* The serial bootloader images are much smaller now and are able to load kernel images of up to about 8 MB.
+
+A number of fixes have been applied:
+
+* `CGPIOClock::Stop()` was operating on the wrong clock. This caused a stop of the UART clock, when GPIOClock2 was started.
+* `CMachineInfo::GetClockRate()` now favors the firmware function `GET_CLOCK_RATE_MEASURED` over `GET_CLOCK_RATE`, which reported a wrong Core clock rate, when `CCPUThrottle` was used. The reported value is rounded to the closest MHz value.
+* The *cmdline.txt* option `wm8960tune=` has been added as a workaround. Add the given value to the fractional (K) part of PLL1 input/output frequency ratio (treated as 24-digit binary number) of the WM8960 Codec to suppress clicks/pops (range -10000 to 10000, default 0).
+* There have been multiple issues with the handling of TCP FIN packets, which were leading to a delayed termination of connections.
+* There was a problem found in the scheduler using KASan, which was accessing a task object after deleting it.
+
+Release 50.1
+------------
+
+2026-02-01
+
+New features:
+
+* An **NVMe v1.4 SSD driver** for the Raspberry Pi 5 has been added (see [addon/nvme](addon/nvme)). v1.3 NVMe SSDs should work too. This support is currently experimental. Be sure that your SSD does not contain important data, if you want to test it. You should define the system option `NO_BUSY_WAIT` and your application should contain the scheduler for maximum performance.
+
+* The **Kernel Address Sanitizer (Kasan)** has been implemented for Circle. It can help to find invalid memory accesses while debugging. See [doc/kasan.txt](doc/kasan.txt) for details!
+
+* The **KY-040 rotary encoder driver** has been improved to support quarter-step and half-step rotary encoders. Full-step rotary encoders still are the default.
+
+* The class **CI2SSoundBaseDevice** can be used in **DeviceModeTXRX mode on the Raspberry Pi 5** now with 2 channels.
+
+* The class **CConsole** provides a **more comfortable line editor** and a command history now.
+
+* **Multi-core Circle programs can run in QEMU** (AArch64) now. `configure --qemu` disables DMA usage for the frame buffer, because it does not work with QEMU.
+
+* A **receive and/or send timeout on a socket** can be set using `CSocket::SetOption[Receive|Send]Timeout()` now . The constructor of the class `CHTTPDaemon` got a new timeout parameter to close the HTTP connection, when the request does not complete in the given amount of time. The *sample/21-webserver* has been updated to use this feature.
+
+* The DNS resolver class **CDNSClient** resolves the host name "localhost" as the own IP address now.
+
+Fixes:
+
+* There might have been a failed assertion in WLAN Mesh environments before, which has been fixed.
+* `memcpy()` did not check the destination alignment right in AArch64.
+* When an error occurred on a TCP connection, close was not executed properly and the connection was not shutdown.
+
+More changes:
+
+* The LVGL support has been updated to v9.4.0.
+* The FatFs support has been updated to R0.16 w/patch1.
+
+Release 50.0.1
+--------------
+
+2025-09-18
+
+This is a hotfix release, which fixes a serious bug in the class `CmDNSDaemon`, which also affected the class `CmDNSPublisher`. If you are using one of these classes, you should upgrade.
+
+The 50th Step
+-------------
+
+2025-08-15
+
+This release comes with full (send and receive) network multicast support, including IGMPv2 support. A class `CmDNSDaemon` has been added, which determines and maintains our mDNS hostname on the local network. Name collisions with other hosts will be resolved by appending a numeric suffix to the hostname. The daemon is automatically started, when someone requests a pointer to it. This has been added to the `CmDNSPublisher` class, which works in conjunction with `CmDNSDaemon` now. The *test/mdns-publisher* uses the numeric suffix to generate an unique service name.
+
+More news:
+
+* The function of the `CTerminalDevice` sequences ESC "[0m" and ESC "[27m" have been modified. The first one resets the color settings too, while the second one resets the reversed mode only.
+* The method `CLogger::Read()` returns 0 now, when the log buffer is empty. Before it returned -1.
+* The DHCP process has been improved and is quicker now under some circumstances.
+* A method `GetUptime(sec, usec)` has been added to the class `CTimer`.
+* The FatFs library in *addon/fatfs/* has been updated to R0.16 with Unicode patch.
+* A display font `Font12x22` has been added. The class `CCharGenerator` can handle fonts, with a width of up to 32 pixels.
+
+Fixes:
+
+* The HDMI sound support with the class `CHDMISoundBaseDevice` did not work since Step 49.
+* The WLAN support in earlier versions was based on a port of wpa_supplicant v0.7.0, for which open security advisories exist. This has been fixed by porting wpa_supplicant v2.11 to Circle.
+* The Handling of "Enumeration done" in the USB gadget driver had issues, that made booting from the USB mass-storage device (MSD) gadget impossible.
+
+The recommended toolchain for building Circle is based on GCC 14.3.1 now (see the Building section).
+
+The recommended firmware, downloadable in *boot/*, has been updated. For the Raspberry Pi 5 it is required to use the new DTB file(s), because otherwise some functions will not work with this Circle version.
+
+The WLAN firmware, downloadable in *addon/wlan/firmware/*, has been updated. It is absolutely recommended to use the new firmware, because older versions may have security vulnerabilities.
+
 Release 49.0.1
 --------------
+
+2025-06-18
 
 This hotfix release solves the following issues:
 

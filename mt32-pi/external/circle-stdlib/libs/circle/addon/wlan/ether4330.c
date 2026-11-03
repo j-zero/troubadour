@@ -175,6 +175,7 @@ struct Ctlr {
 	int	chanid;
 	uchar	bssid[Eaddrlen];
 	char	essid[WNameLen + 1];
+	char	scanssid[WNameLen + 1];	/* directed SSID for hidden-net scan */
 	WKey	keys[WNKeys];
 	Block	*rsp;
 	Block	*scanb;
@@ -250,7 +251,7 @@ static Cmdtab cmds[] = {
 	{CMdebug,	"debug", 2},
 	{CMjoin,	"join", 5},
 	{CMdisassoc,	"disassoc", 2},
-	{CMescan,	"escan", 2},
+	{CMescan,	"escan", 3},
 	{CMcountry,	"country", 2},
 	{CMcreate,	"create", 4},
 	{CMdown,	"down", 1},
@@ -293,8 +294,10 @@ static struct {
 	{ 0x4330, 4,	"fw_bcm40183b2.bin", config40183, 0 },
 	{ 43362, 0,	"fw_bcm40181a0.bin", config40181, 0 },
 	{ 43362, 1,	"fw_bcm40181a2.bin", config40181, 0 },
-	{ 43430, 1,	"brcmfmac43430-sdio.bin", "brcmfmac43430-sdio.txt", 0 },
+	{ 43430, 1,	"brcmfmac43430-sdio.bin", "brcmfmac43430-sdio.txt", "brcmfmac43430-sdio.clm_blob" },
 	{ 43430, 2,	"brcmfmac43436-sdio.bin", "brcmfmac43436-sdio.txt", "brcmfmac43436-sdio.clm_blob" },
+	// This may be necessary for newer Raspberry Pi Zero 2 W:
+	// { ???, ???,	"brcmfmac43436s-sdio.bin", "brcmfmac43436s-sdio.txt", 0 },
 #if RASPPI <= 4
 	{ 0x4345, 6, "brcmfmac43455-sdio.bin", "brcmfmac43455-sdio.txt", "brcmfmac43455-sdio.clm_blob" },
 #else
@@ -690,11 +693,13 @@ sbmem(int write, uchar *buf, int len, ulong off)
 static void
 packetrw(int write, uchar *buf, int len)
 {
-	int n;
+	uchar b[2048];
+	int n, m;
 	int retry;
 
 	n = 2048;
 	while(len > 0){
+		m = n;
 		if(n > len)
 			n = ROUND(len, 4);
 		retry = 0;
@@ -703,7 +708,15 @@ packetrw(int write, uchar *buf, int len)
 			if(++retry == 3)
 				nexterror();
 		}
-		sdiorwext(Fn2, write, buf, n, Enumbase, 0);
+		if (m != n){
+			if (write)
+				memcpy(b, buf, len);
+			sdiorwext(Fn2, write, b, n, Enumbase, 0);
+			if (!write)
+				memcpy(buf, b, len);
+		}
+		else
+			sdiorwext(Fn2, write, buf, n, Enumbase, 0);
 		poperror();
 		buf += n;
 		len -= n;
@@ -1619,8 +1632,10 @@ bcmevent(Ctlr *ctl, uchar *p, int len)
 		callevhndlr(ctl, ether_event_deauth, 0);
 		break;
 	case 16:	/* E_LINK */
-		if(flags&1)	/* link up */
+		if(flags&1){	/* link up */
+			callevhndlr(ctl, ether_event_link, 0);
 			break;
+		}
 	/* fall through */
 	case 12:	/* E_DISASSOC_IND */
 		linkdown(ctl);
@@ -1932,34 +1947,58 @@ wlcreateAP(Ctlr *ctl, char *ssid, int channel, int hidden)	/* by @sebastienNEC *
 }
 
 static void
-wlscanstart(Ctlr *ctl)
+wlscanstart(Ctlr *ctl, char *ssid)
 {
 	/* version[4] action[2] sync_id[2] ssidlen[4] ssid[32] bssid[6] bss_type[1]
 		scan_type[1] nprobes[4] active_time[4] passive_time[4] home_time[4]
-		nchans[2] nssids[2] chans[nchans][2] ssids[nssids][32] */
+		nchans[2] nssids[2] chans[nchans][2] ssids[nssids][4+32] */
+	/* each ssids[] entry is brcmf_ssid_le { le32 len; uchar ssid[32]; } */
 	/* hack - this is only correct on a little-endian cpu */
-	static uchar params[4+2+2+4+32+6+1+1+4*4+2+2+14*2+32+4] = {
-		1,0,0,0,
-		1,0,
-		0x34,0x12,
-		0,0,0,0,
-		0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-		0xff,0xff,0xff,0xff,0xff,0xff,
-		2,
-		0,
-		0xff,0xff,0xff,0xff,
-		0xff,0xff,0xff,0xff,
-		0xff,0xff,0xff,0xff,
-		0xff,0xff,0xff,0xff,
-		14,0,
-		1,0,
+	static const uchar chanspecs[14*2] = {
 		0x01,0x2b,0x02,0x2b,0x03,0x2b,0x04,0x2b,0x05,0x2e,0x06,0x2e,0x07,0x2e,
 		0x08,0x2b,0x09,0x2b,0x0a,0x2b,0x0b,0x2b,0x0c,0x2b,0x0d,0x2b,0x0e,0x2b,
-		0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 	};
+	uchar params[4+2+2+4+32+6+1+1+4*4+2+2+14*2 + 2*(4+32)];
+	uchar *p;
+	int ssidlen, nssids;
 
-	wlcmdint(ctl, 49, 0);	/* PASSIVE_SCAN */
-	wlsetvar(ctl, "escan", params, sizeof params);
+	ssidlen = ssid != nil ? strlen(ssid) : 0;
+	ssidlen = MIN(ssidlen, 32);
+	/* always probe with a wildcard entry so visible APs are still found;
+	   add a directed entry to also probe a hidden SSID when one is set */
+	nssids = ssidlen > 0 ? 2 : 1;
+
+	memset(params, 0, sizeof params);
+	p = params;
+	p = put4(p, 1);			/* version */
+	p = put2(p, 1);			/* action = WL_SCAN_ACTION_START */
+	p = put2(p, 0x1234);		/* sync_id */
+	p = put4(p, 0);			/* top-level ssidlen (wildcard) */
+	p += 32;			/* top-level ssid[32] (unused) */
+	memset(p, 0xff, Eaddrlen);	/* bssid = broadcast */
+	p += Eaddrlen;
+	*p++ = 2;			/* bss_type = DOT11_BSSTYPE_ANY */
+	*p++ = 0;			/* scan_type = active (send probe reqs) */
+	p = put4(p, -1);		/* nprobes (firmware default) */
+	p = put4(p, -1);		/* active_time */
+	p = put4(p, -1);		/* passive_time */
+	p = put4(p, -1);		/* home_time */
+	p = put2(p, 14);		/* nchans (channel_num, low half) */
+	p = put2(p, nssids);		/* nssids (channel_num, high half) */
+	memmove(p, chanspecs, sizeof chanspecs);
+	p += sizeof chanspecs;
+	/* ssids[0]: wildcard entry (len 0) */
+	p = put4(p, 0);
+	p += 32;
+	if(ssidlen > 0){
+		/* ssids[1]: directed probe for the hidden network */
+		p = put4(p, ssidlen);
+		memmove(p, ssid, ssidlen);
+		p += 32;
+	}
+
+	wlcmdint(ctl, 49, 0);	/* PASSIVE_SCAN off => active scan */
+	wlsetvar(ctl, "escan", params, p - params);
 }
 
 #ifndef __circle__
@@ -2116,7 +2155,7 @@ lproc(void *a)
 				if(waserror())
 					ctlr->scansecs = 0;
 				else{
-					wlscanstart(ctlr);
+					wlscanstart(ctlr, ctlr->scanssid);
 					poperror();
 				}
 				secs = ctlr->scansecs;
@@ -2345,8 +2384,11 @@ setauth(Ctlr *ctlr, Cmdbuf *cb, char *a)
 	uchar wpaie[32];
 	int i;
 
-	i = parsehex((char*)wpaie, sizeof wpaie, a);
-	if(i < 2 || i != wpaie[1] + 2)
+	i = parsehex((char*)wpaie, 2, a);
+	if(i != 2 || wpaie[1] > sizeof wpaie - 2)
+		cmderror(cb, "bad wpa ie syntax");
+	i = parsehex((char*)wpaie, wpaie[1] + 2, a);
+	if(i != wpaie[1] + 2)
 		cmderror(cb, "bad wpa ie syntax");
 	if(wpaie[0] == 0xdd)
 		ctlr->cryptotype = Wpa;
@@ -2478,7 +2520,12 @@ etherbcmctl(Ether* edev, const void* buf, long n)
 		if (ctlr->status != Disconnected)
 			wlcmdint(ctlr, 52, atoi(cb->f[1]));	/* DISASSOC */
 		break;
-	case CMescan:		/* escan seconds */
+	case CMescan:		/* escan seconds [ssid] */
+		if(cb->argc > 2 && cb->f[2] != nil)
+			strncpy(ctlr->scanssid, cb->f[2], sizeof(ctlr->scanssid) - 1);
+		else
+			ctlr->scanssid[0] = '\0';
+		ctlr->scanssid[sizeof(ctlr->scanssid) - 1] = '\0';
 		etherbcmscan(edev, atoi(cb->f[1]));
 		break;
 	case CMcountry:		/* country alpha2 */
@@ -2578,6 +2625,17 @@ etherbcmattach(Ether* edev)
 }
 
 static void
+ethersetmulticast(Ether *edev, void *buf, long n)
+{
+	Ctlr *ctlr;
+
+	ctlr = edev->ctlr;
+	wlsetvar(ctlr, "mcast_list", buf, n);
+	wlsetint(ctlr, "allmulti", 0);
+}
+
+
+static void
 etherbcmshutdown(Ether*edev)
 {
 	Ctlr *ctlr;
@@ -2607,6 +2665,7 @@ etherbcmpnp(Ether* edev)
 	edev->getbssid = etherbcmgetbssid;
 	edev->scanbs = etherbcmscan;
 	edev->setevhndlr = etherbcmsetevhndlr;
+	edev->setmulticast = ethersetmulticast;
 	edev->shutdown = etherbcmshutdown;
 	edev->arg = edev;
 

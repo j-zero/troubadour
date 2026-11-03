@@ -3,6 +3,9 @@
  */
 
 #include "config.h"
+
+#include "wrap_fatfs.h"
+
 #include <_ansi.h>
 #include <_syslist.h>
 #include <sys/types.h>
@@ -10,7 +13,9 @@
 #include <errno.h>
 #include <string.h>
 #include <assert.h>
+#include "circle_macros.h"
 #include "circle_glue.h"
+#include "cglueio.h"
 
 extern "C" int
 _stat(const char *file, struct stat *statbuf)
@@ -46,7 +51,7 @@ _stat(const char *file, struct stat *statbuf)
 	}
 
 	assert (statbuf);
-	memset (statbuf, 0, sizeof statbuf);
+	memset (statbuf, 0, sizeof(*statbuf));
 
 	// Reading, write and executing allowed for all, corrected
 	// below if readonly flag is set
@@ -67,7 +72,7 @@ _stat(const char *file, struct stat *statbuf)
 		statbuf->st_mode |= S_IFREG;
 	}
 
-	statbuf->st_dev = 0x0101;
+	statbuf->st_dev = _CircleStdlib::CGlueIO::DeviceIdFatFs;
 	statbuf->st_ino = 1000;
 	statbuf->st_nlink = 1;
 	statbuf->st_uid = 0;
@@ -77,4 +82,10 @@ _stat(const char *file, struct stat *statbuf)
 	statbuf->st_blocks = (finfo.fsize + 511) / 512;
 
 	return 0;
+}
+
+extern "C" int
+lstat (char const * const file, struct stat * const statbuf)
+{
+	return _stat (file, statbuf);
 }

@@ -41,6 +41,7 @@ USB Audio Class MIDI device support
 Stephan Muehlstrasser
 Correcting problems for building with clang
 Idea for sample/30-gpiofiq
+Kernel Address Sanitizer implementation
 
 Marco Maccaferri
 USB HID class gamepad driver
@@ -129,3 +130,37 @@ Pete Moore
 Adding configure support for macOS
 Adding cFlashy support for macOS
 Optimizing memset() for AArch64
+
+Dani Sarfati
+Robust reset/suspend handling and speed auto-negotiation for USB Mass Storage gadget driver
+Implementing flushing audio device buffers
+Fixing hidden SSID WLAN issue
+
+@speendo
+Supporting configurable encoder types in KY-040 driver
+
+@ToonNelissen
+Adding SSD1309 OLED display driver (I2C + SPI)
+Adding MCP23017 I2C GPIO expander driver
+
+Alex Couture-Beil
+Adding memem() to utils
+
+@marchingband
+Testing CM0
+Adding options to fix dropped USB MIDI messages issue
+
+@aminch
+Adding support for a number of 8BitDo gamepads and keyboards
+Adding support for Xbox 360 PC Wireless Gaming Receiver and clone device
+Fixing TCP ACK handling for fragmented modem sessions and TCP data scrambling issue
+Fixing TheC64 keyboard handling for the two versions
+Fixing blocked USB receives, when Ethernet link is down in LAN7800 and SMSC951x drivers
+Fixing WLAN unable to connect to eero7 router
+
+Ryoichi Tanaka
+Fixing hang on spurious USB disconnect during cold boot
+
+@Valefungo
+Fixing race condition in CSynchronizationEvent::Wait()
+Adding support for USB mice with generic 3-0-0 HID interface

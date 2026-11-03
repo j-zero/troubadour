@@ -6,6 +6,7 @@
 #include <_ansi.h>
 #include <_syslist.h>
 #include <sys/times.h>
+#include <sys/timespec.h>
 #include <errno.h>
 #include "warning.h"
 
@@ -16,4 +17,10 @@ _times(struct tms *buf)
   return -1;
 }
 
-stub_warning(_times)
+int
+timespec_get (struct timespec *ts, int base)
+{
+  return 0;
+}
+
+// stub_warning(_times)

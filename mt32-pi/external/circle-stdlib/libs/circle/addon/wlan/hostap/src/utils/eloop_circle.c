@@ -23,20 +23,18 @@ struct eloop_sock {
 	int sock;
 	void *eloop_data;
 	void *user_data;
-	void (*handler)(int sock, void *eloop_ctx, void *sock_ctx);
+	eloop_sock_handler handler;
 };
 
 struct eloop_timeout {
-	struct os_time time;
+	struct os_reltime time;
 	void *eloop_data;
 	void *user_data;
-	void (*handler)(void *eloop_ctx, void *sock_ctx);
+	eloop_timeout_handler handler;
 	struct eloop_timeout *next;
 };
 
 struct eloop_data {
-	void *user_data;
-
 	int max_sock, reader_count;
 	struct eloop_sock *readers;
 
@@ -49,17 +47,14 @@ struct eloop_data {
 static struct eloop_data eloop;
 
 
-int eloop_init(void *user_data)
+int eloop_init(void)
 {
 	memset(&eloop, 0, sizeof(eloop));
-	eloop.user_data = user_data;
 	return 0;
 }
 
 
-int eloop_register_read_sock(int sock,
-			     void (*handler)(int sock, void *eloop_ctx,
-					     void *sock_ctx),
+int eloop_register_read_sock(int sock, eloop_sock_handler handler,
 			     void *eloop_data, void *user_data)
 {
 	struct eloop_sock *tmp;
@@ -107,8 +102,14 @@ void eloop_unregister_read_sock(int sock)
 }
 
 
+int eloop_sock_requeue(void)
+{
+	return 0;
+}
+
+
 int eloop_register_timeout(unsigned int secs, unsigned int usecs,
-			   void (*handler)(void *eloop_ctx, void *timeout_ctx),
+			   eloop_timeout_handler handler,
 			   void *eloop_data, void *user_data)
 {
 	struct eloop_timeout *timeout, *tmp, *prev;
@@ -116,7 +117,7 @@ int eloop_register_timeout(unsigned int secs, unsigned int usecs,
 	timeout = (struct eloop_timeout *) malloc(sizeof(*timeout));
 	if (timeout == NULL)
 		return -1;
-	os_get_time(&timeout->time);
+	os_get_reltime(&timeout->time);
 	timeout->time.sec += secs;
 	timeout->time.usec += usecs;
 	while (timeout->time.usec >= 1000000) {
@@ -136,7 +137,7 @@ int eloop_register_timeout(unsigned int secs, unsigned int usecs,
 	prev = NULL;
 	tmp = eloop.timeout;
 	while (tmp != NULL) {
-		if (os_time_before(&timeout->time, &tmp->time))
+		if (os_reltime_before(&timeout->time, &tmp->time))
 			break;
 		prev = tmp;
 		tmp = tmp->next;
@@ -154,7 +155,7 @@ int eloop_register_timeout(unsigned int secs, unsigned int usecs,
 }
 
 
-int eloop_cancel_timeout(void (*handler)(void *eloop_ctx, void *sock_ctx),
+int eloop_cancel_timeout(eloop_timeout_handler handler,
 			 void *eloop_data, void *user_data)
 {
 	struct eloop_timeout *timeout, *prev, *next;
@@ -186,8 +187,78 @@ int eloop_cancel_timeout(void (*handler)(void *eloop_ctx, void *sock_ctx),
 }
 
 
-int eloop_is_timeout_registered(void (*handler)(void *eloop_ctx,
-						void *timeout_ctx),
+int eloop_cancel_timeout_one(eloop_timeout_handler handler,
+			     void *eloop_data, void *user_data,
+			     struct os_reltime *remaining)
+{
+	struct eloop_timeout *timeout, *prev;
+	int removed = 0;
+	struct os_reltime now;
+
+	os_get_reltime(&now);
+	remaining->sec = remaining->usec = 0;
+
+	prev = NULL;
+	timeout = eloop.timeout;
+	while (timeout != NULL) {
+		if (timeout->handler == handler &&
+		    (timeout->eloop_data == eloop_data) &&
+		    (timeout->user_data == user_data)) {
+			removed = 1;
+			if (os_reltime_before(&now, &timeout->time))
+				os_reltime_sub(&timeout->time, &now, remaining);
+			if (prev == NULL)
+				eloop.timeout = timeout->next;
+			else
+				prev->next = timeout->next;
+			free(timeout);
+			break;
+		}
+
+		prev = timeout;
+		timeout = timeout->next;
+	}
+
+	return removed;
+}
+
+
+int eloop_deplete_timeout(unsigned int req_secs, unsigned int req_usecs,
+			  eloop_timeout_handler handler, void *eloop_data,
+			  void *user_data)
+{
+	struct os_reltime now, requested, remaining;
+	struct eloop_timeout *tmp;
+
+	tmp = eloop.timeout;
+	while (tmp != NULL) {
+		if (tmp->handler == handler &&
+		    tmp->eloop_data == eloop_data &&
+		    tmp->user_data == user_data) {
+			requested.sec = req_secs;
+			requested.usec = req_usecs;
+			os_get_reltime(&now);
+			os_reltime_sub(&tmp->time, &now, &remaining);
+			if (os_reltime_before(&requested, &remaining)) {
+				eloop_cancel_timeout(handler, eloop_data,
+						     user_data);
+				eloop_register_timeout(requested.sec,
+						       requested.usec,
+						       handler, eloop_data,
+						       user_data);
+				return 1;
+			}
+			return 0;
+		}
+
+		tmp = tmp->next;
+	}
+
+	return -1;
+}
+
+
+int eloop_is_timeout_registered(eloop_timeout_handler handler,
 				void *eloop_data, void *user_data)
 {
 	struct eloop_timeout *tmp;
@@ -206,16 +277,14 @@ int eloop_is_timeout_registered(void (*handler)(void *eloop_ctx,
 }
 
 
-int eloop_register_signal_terminate(void (*handler)(int sig, void *eloop_ctx,
-						    void *signal_ctx),
+int eloop_register_signal_terminate(eloop_signal_handler handler,
 				    void *user_data)
 {
 	return 0;
 }
 
 
-int eloop_register_signal_reconfig(void (*handler)(int sig, void *eloop_ctx,
-						   void *signal_ctx),
+int eloop_register_signal_reconfig(eloop_signal_handler handler,
 				   void *user_data)
 {
 	return 0;
@@ -225,7 +294,7 @@ int eloop_register_signal_reconfig(void (*handler)(int sig, void *eloop_ctx,
 void eloop_run(void)
 {
 	int i;
-	struct os_time now;
+	struct os_reltime now;
 
 	while (!eloop.terminate) {
 		os_sleep(0, l2_packet_auth_active () ? 10000 : 200000);
@@ -234,8 +303,8 @@ void eloop_run(void)
 		if (eloop.timeout) {
 			struct eloop_timeout *tmp;
 
-			os_get_time(&now);
-			if (!os_time_before(&now, &eloop.timeout->time)) {
+			os_get_reltime(&now);
+			if (!os_reltime_before(&now, &eloop.timeout->time)) {
 				tmp = eloop.timeout;
 				eloop.timeout = eloop.timeout->next;
 				tmp->handler(tmp->eloop_data,
@@ -275,16 +344,4 @@ void eloop_destroy(void)
 		free(prev);
 	}
 	free(eloop.readers);
-}
-
-
-int eloop_terminated(void)
-{
-	return eloop.terminate;
-}
-
-
-void * eloop_get_user_data(void)
-{
-	return eloop.user_data;
 }

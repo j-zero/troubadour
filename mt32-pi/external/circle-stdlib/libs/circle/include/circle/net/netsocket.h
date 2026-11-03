@@ -2,7 +2,7 @@
 // netsocket.h
 //
 // Circle - A C++ bare metal environment for Raspberry Pi
-// Copyright (C) 2018-2024  R. Stange <rsta2@o2online.de>
+// Copyright (C) 2018-2025  R. Stange <rsta2@gmx.net>
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -65,7 +65,7 @@ public:
 	/// \brief Send a message to a remote host
 	/// \param pBuffer Pointer to the message
 	/// \param nLength Length of the message
-	/// \param nFlags  MSG_DONTWAIT (non-blocking operation) or 0 (blocking operation)
+	/// \param nFlags  MSG_DONTWAIT (non-blocking operation), MSG_MORE (Sender will send more)
 	/// \return Length of the sent message (< 0 on error)
 	virtual int Send (const void *pBuffer, unsigned nLength, int nFlags) = 0;
 
@@ -80,7 +80,7 @@ public:
 	/// \brief Send a message to a specific remote host
 	/// \param pBuffer	Pointer to the message
 	/// \param nLength	Length of the message
-	/// \param nFlags	MSG_DONTWAIT (non-blocking operation) or 0 (blocking operation)
+	/// \param nFlags	MSG_DONTWAIT (non-blocking operation), MSG_MORE (Sender will send more)
 	/// \param rForeignIP	IP address of host to be sent to (ignored on TCP socket)
 	/// \param nForeignPort	Number of port to be sent to (ignored on TCP socket)
 	/// \return Length of the sent message (< 0 on error)
@@ -98,11 +98,34 @@ public:
 	virtual int ReceiveFrom (void *pBuffer, unsigned nLength, int nFlags,
 				 CIPAddress *pForeignIP, u16 *pForeignPort) { return -1; }
 
+	/// \brief Set a timeout for Receive() and ReceiveFrom()
+	/// \param nMicroSeconds Timeout in us (or 0 to wait forever, default)
+	/// \return Status (0 success, < 0 on error)
+	/// \note The timeout applies only, when the flag MSG_DONTWAIT is not used.
+	virtual int SetOptionReceiveTimeout (unsigned nMicroSeconds) { return -1; }
+
+	/// \brief Set a timeout for Send() and SendTo()
+	/// \param nMicroSeconds Timeout in us (or 0 to wait forever, default)
+	/// \return Status (0 success, < 0 on error)
+	/// \note The timeout applies only, when the flag MSG_DONTWAIT is not used.
+	virtual int SetOptionSendTimeout (unsigned nMicroSeconds) { return -1; }
+
 	/// \brief Call this with bAllowed == TRUE after Bind() or Connect() to be able\n
 	/// to send and receive broadcast messages (ignored on TCP socket)
 	/// \param bAllowed Sending and receiving broadcast messages allowed on this socket? (default FALSE)
 	/// \return Status (0 success, < 0 on error)
 	virtual int SetOptionBroadcast (boolean bAllowed) { return -1; }
+
+	/// \brief Add to IP multicast host group (on UDP socket only)
+	/// \param rGroupAddress Group address to be added
+	/// \return Status (0 success, < 0 on error)
+	/// \note Only one host group is allowed per socket.
+	virtual int SetOptionAddMembership (const CIPAddress &rGroupAddress) { return -1; }
+
+	/// \brief Drop from IP multicast host group (on UDP socket only)
+	/// \param rGroupAddress Group address to be dropped
+	/// \return Status (0 success, < 0 on error)
+	virtual int SetOptionDropMembership (const CIPAddress &rGroupAddress) { return -1; }
 
 	/// \brief Get IP address of connected remote host
 	/// \return Pointer to IP address (four bytes, 0-pointer if not connected)

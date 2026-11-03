@@ -65,6 +65,11 @@ endif
 # Improve I/O throughput
 	@echo "DEFINE += -DNO_BUSY_WAIT" >> $(CIRCLE_CONFIG)
 
+# Access the SD card through the EMMC controller rather than SDHOST on the Pi 1-3 and Zero (2 W): the SDHOST driver
+# holds a spin lock with interrupts disabled while transferring data, which delays the audio interrupt long enough
+# for dropouts whenever settings or presets are saved. WLAN can't be used together with the SD card then.
+	@echo "DEFINE += -DNO_SDHOST" >> $(CIRCLE_CONFIG)
+
 # Enable PWM audio output on GPIO 12/13 for the Pi Zero 2 W
 	@echo "DEFINE += -DUSE_PWM_AUDIO_ON_ZERO" >> $(CIRCLE_CONFIG)
 

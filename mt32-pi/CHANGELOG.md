@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The SD card is accessed through the EMMC controller instead of SDHOST (`NO_SDHOST`), whose driver blocks interrupts while transferring data, which interrupted the sound whenever settings or presets were saved. Wi-Fi can't be used on the Raspberry Pi 3 and Zero 2 W because of this.
 - `last_state.cfg` is written in a task of its own, so that MIDI isn't delayed while the SD card is being written (about two seconds after a setting or the instrument has changed).
 - An instrument that doesn't fit into memory no longer halts the system ("Guru Meditation"); "Out of memory!" is shown instead. Selecting an instrument with the buttons releases the previous one first, so that both don't need to fit into memory at once.
 

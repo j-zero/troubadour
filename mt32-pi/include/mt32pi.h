@@ -97,19 +97,14 @@ private:
 	static constexpr unsigned LastStateSaveDelayMillis = 2000;
 
 	// Menus of the simple_encoder scheme: the first encoder selects the instrument from a list. Pressing the second
-	// one opens the settings, with submenus; either encoder selects an item and pressing the second one opens it. The
-	// second encoder then changes its value (or selects the drum kit/SoundFont from a list), and pressing it returns
-	// to the list.
+	// one opens the settings, with submenus: the first encoder selects an item, the second one changes its value
+	// right away, and pressing the second one opens a submenu or does what the item says. A value chosen from a list
+	// (e.g. an instrument, which may take a while to load) is applied by pressing the second encoder.
 	enum class TMenu
 	{
 		None,
 		Instruments,
 		Settings,
-		Parameter,
-		DrumKits,
-		SoundFonts,
-		Presets,
-		PresetInstruments,	// The instrument of the current preset, chosen in the settings
 	};
 
 	static constexpr unsigned MenuTimeoutMillis = 8000;
@@ -147,6 +142,14 @@ private:
 	static constexpr u8 SettingDisplayStandby   = SettingPresetDelete + 1;
 	static constexpr u8 SettingPresetInstrument = SettingDisplayStandby + 1;
 	static constexpr u8 SettingTPProgramPresets = SettingPresetInstrument + 1;
+	// The preset's MIDI channels: a submenu with an item per channel, each opening the channel's settings (for the
+	// channel being edited): sound on/off, instrument, split note and the instrument from it upwards
+	static constexpr u8 SettingChannelsMenu     = SettingTPProgramPresets + 1;
+	static constexpr u8 SettingChannelFirst     = SettingChannelsMenu + 1;
+	static constexpr u8 SettingChEnabled        = SettingChannelFirst + CPresets::MIDIChannels;
+	static constexpr u8 SettingChInstrument     = SettingChEnabled + 1;
+	static constexpr u8 SettingChSplit          = SettingChInstrument + 1;
+	static constexpr u8 SettingChUpper          = SettingChSplit + 1;
 
 	// Settings > Preset holds what is stored in the current preset, Settings > Global everything else
 	enum class TSettingsPage
@@ -157,7 +160,11 @@ private:
 		Effects,
 		Global,
 		GlobalTP,
+		Channels,
+		Channel,
 	};
+
+	static constexpr u8 NoPendingSetting = 0xFF;
 
 	static constexpr size_t MaxSettingsPageItems = 24;
 	static constexpr u8 MaxDisplayChannels = 16;
@@ -225,28 +232,38 @@ private:
 	size_t GetSettingsItems(u8* pItems) const;
 	int FindSettingsItem(u8 nSetting) const;
 	void OpenSettingsPage(TSettingsPage Page, u8 nSelectedSetting);
-	bool IsSettingsMenu() const
-	{
-		return m_Menu == TMenu::Settings || m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts
-		    || m_Menu == TMenu::Presets || m_Menu == TMenu::PresetInstruments;
-	}
+	bool IsSettingsMenu() const { return m_Menu == TMenu::Settings; }
+	// Pressing the second encoder on an item: opens a submenu or does what it says
 	void OpenSetting(u8 nSetting);
+	// Turning the second encoder on an item: changes its value, or chooses from its list
+	void ChangeSetting(u8 nSetting, int nDelta);
+	// Settings whose value is chosen from a list, and applied by pressing the encoder
+	bool IsListSetting(u8 nSetting) const;
+	size_t GetSettingListCount(u8 nSetting);
+	size_t GetSettingListIndex(u8 nSetting);
+	void FormatSettingListItem(u8 nSetting, size_t nIndex, char* pBuffer, size_t nSize);
+	void ApplySettingListItem(u8 nSetting, size_t nIndex);
 	void UpdateTriplePlayStatus();
 	void SetTriplePlayEnabled(bool bEnabled);
 	void SetTriplePlaySoftwareMode(bool bSoftwareMode);
 	void SetTriplePlayProgramPresets(bool bOn);
 	void UpdateTriplePlayPrograms();
 	void UpdatePinnedInstruments();
-	bool GetCurrentInstrument(const char** ppSoundFontPath, int* pBank, int* pProgram);
 	// Presets
+	const CPresets::TPreset* GetCurrentPreset() const;
 	void ApplyPreset(size_t nIndex);
+	// The instrument of the preset (on channels 1-6 that don't have their own), and the channels' own settings
+	bool ApplyMainInstrument(size_t nIndex);
+	void ApplyPresetChannel(u8 nChannel);
+	void ChangePresetChannel(u8 nChannel, const CPresets::TChannel& Channel);
 	bool GetCurrentPresetState(CPresets::TPreset& Preset);
 	void CapturePreset();
 	void NewPreset();
 	void DeletePreset();
 	void UpdatePresetLabel();
-	const char* GetSettingName(u8 nSetting) const;
-	const char* GetSettingsPageTitle() const;
+	void FormatSettingName(u8 nSetting, char* pBuffer, size_t nSize) const;
+	void FormatSettingsPageTitle(char* pBuffer, size_t nSize) const;
+	void FormatChannelInstrument(u8 nChannel, bool bUpper, char* pBuffer, size_t nSize);
 	// Returns false for items without a value (submenus, "Back", "Exit")
 	bool FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction = nullptr);
 	size_t GetMenuListCount() const;
@@ -254,10 +271,11 @@ private:
 	void MoveInstrumentSelection(int nDelta);
 	void SelectMenuInstrument();
 	void ChangeParameter(int nDelta);
+	static void FormatNote(int nNote, char* pBuffer, size_t nSize);
 	// Actions that can be triggered via events
 	void SwitchSoundFont(size_t nIndex);
 	void DeferSwitchSoundFont(size_t nIndex);
-	bool ApplyProgramChange(size_t nIndex);
+	bool ApplyProgramChange(size_t nIndex);	// The instrument list: the preset's instrument
 	bool ApplyDrumKit(size_t nIndex);
 	void ApplyLastInstrument();
 	void SetMasterVolume(s32 nVolume);
@@ -323,6 +341,10 @@ private:
 	size_t m_nMenuCurrentIndex;
 	unsigned m_nMenuTime;
 	unsigned m_nLastParameterTurnTime;
+	u8 m_nEditChannel;		// The channel whose settings are open
+	// A value chosen from a list for the selected item, until it is applied
+	u8 m_nPendingSetting;
+	size_t m_nPendingIndex;
 
 	// Settings that are restored on startup
 	CLastState m_LastState;
@@ -369,6 +391,7 @@ private:
 	bool m_bApplyingPreset;	// Its own changes aren't saved back into it
 	bool m_bPresetChanged;
 	unsigned m_nPresetChangeTime;
+	u16 m_nOwnInstrumentMask;	// Channels that have the preset's own instrument for them
 
 	// Synthesizer
 	u8 m_nMasterVolume;

@@ -41,6 +41,19 @@ public:
 	static constexpr u8 EffectCount = static_cast<u8>(CSoundFontSynth::TEffect::Count);
 	static constexpr int Unknown = -1000;
 	static constexpr u8 TPStrings = 6;
+	static constexpr u8 MIDIChannels = 16;
+	static constexpr int NoSplit = -1;
+
+	// What a MIDI channel plays in the preset
+	struct TChannel
+	{
+		bool bEnabled;		// Muted otherwise
+		int nBank;		// The channel's own instrument, or Unknown for the preset's (channels 1-6) or the
+		int nProgram;		// SoundFont's default one (the others)
+		int nSplitNote;		// From this note upwards, the upper instrument; NoSplit for none
+		int nUpperBank;
+		int nUpperProgram;
+	};
 
 	struct TPreset
 	{
@@ -56,6 +69,7 @@ public:
 		int nTPBendRange;
 		int nTPChannelMode;
 		int TPSensitivity[TPStrings];		// 1-16, high E first
+		TChannel Channels[MIDIChannels];
 	};
 
 	CPresets(const char* pDirectory);
@@ -76,6 +90,8 @@ public:
 	void Delete(size_t nIndex);
 
 	static void Clear(TPreset& Preset);
+	static void Clear(TChannel& Channel);
+	static bool IsDefault(const TChannel& Channel);
 
 private:
 	struct TEntry

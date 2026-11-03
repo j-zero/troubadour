@@ -657,41 +657,23 @@ void CUserInterface::DrawMenu(const TMenu& Menu, unsigned int nTicks)
 {
 	// Text is shown as large as it fits, so that all of it can be read; only if it doesn't fit in the smallest
 	// font, it is shortened (or scrolls, if selected)
-	static const TUIFont* const TitleFonts[] = { &FontMedium, &FontSmall, &FontTiny };
-	static const TUIFont* const ValueFonts[] = { &FontLarge, &FontMedium, &FontSmall };
+	static const TUIFont* const SelectedFonts[] = { &FontMedium, &FontSmall, &FontTiny };
 	static const TUIFont* const RowFonts[] = { &FontSmall, &FontTiny };
 
-	if (Menu.Type == TMenu::TType::Parameter)
-	{
-		DrawGauge(104, 116, Menu.nFraction, ColorAccent);
-
-		char Page[16];
-		snprintf(Page, sizeof(Page), "%d / %d", Menu.nPage, Menu.nPages);
-		// Inside the gauge; the title and the value keep their centres when they get smaller
-		m_pCanvas->DrawCenteredText(FontSmall, Page, 52, ColorTextFaint, 98);
-
-		const int nTitleY = 84 + FontMedium.nHeight / 2;
-		const TUIFont& TitleFont = FitFont(*m_pCanvas, Menu.Title, CCanvas::GetVisibleWidth(nTitleY - 12, nTitleY + 12, 98), TitleFonts);
-		DrawScrollingText(TitleFont, Menu.Title, nTitleY - TitleFont.nHeight / 2, ColorText, 98, nTicks);
-
-		const int nValueY = 110 + FontLarge.nHeight / 2;
-		const TUIFont& ValueFont = FitFont(*m_pCanvas, Menu.Value, CCanvas::GetVisibleWidth(nValueY - 16, nValueY + 16, 98), ValueFonts);
-		m_pCanvas->DrawCenteredText(ValueFont, Menu.Value, nValueY - ValueFont.nHeight / 2, ColorAccentText, 98);
-		return;
-	}
-
-	// List with the selection in the middle
-	constexpr int nRowHeight = 34;
-	constexpr int nSelectionHeight = 32;
+	// Rows of two lines, the selection in the middle
+	constexpr int nRowHeight = 58;
+	constexpr int nSelectionHeight = 54;
 	constexpr int nMiddleY = 128;
+	constexpr int nTitleY = 22;
 
-	const TUIFont& ListTitleFont = FitFont(*m_pCanvas, Menu.Title, CCanvas::GetVisibleWidth(30, 30 + FontSmall.nHeight, 118), RowFonts);
-	DrawScrollingText(ListTitleFont, Menu.Title, 30 + FontSmall.nHeight - ListTitleFont.nHeight, ColorAccentText, 118, nTicks);
+	const TUIFont& TitleFont = FitFont(*m_pCanvas, Menu.Title, CCanvas::GetVisibleWidth(nTitleY, nTitleY + FontSmall.nHeight, 116), RowFonts);
+	DrawScrollingText(TitleFont, Menu.Title, nTitleY + FontSmall.nHeight - TitleFont.nHeight, ColorAccentText, 116, nTicks);
 
 	for (size_t nRow = 0; nRow < TMenu::ListRows; ++nRow)
 	{
-		const char* pText = Menu.Rows[nRow];
-		if (!*pText)
+		const char* pName = Menu.Names[nRow];
+		const char* pValue = Menu.Values[nRow];
+		if (!*pName)
 			continue;
 
 		const int nDistance = static_cast<int>(nRow) - static_cast<int>(TMenu::SelectedRow);
@@ -700,21 +682,66 @@ void CUserInterface::DrawMenu(const TMenu& Menu, unsigned int nTicks)
 		if (nDistance == 0)
 		{
 			const int nY = nCenterY - nSelectionHeight / 2;
-			const int nWidth = CCanvas::GetVisibleWidth(nY, nY + nSelectionHeight, 112);
-			m_pCanvas->FillRoundedRect(CCanvas::Center - nWidth / 2, nY, nWidth, nSelectionHeight, 10, ColorSelection);
+			const int nWidth = CCanvas::GetVisibleWidth(nY, nY + nSelectionHeight, 110);
+			m_pCanvas->FillRoundedRect(CCanvas::Center - nWidth / 2, nY, nWidth, nSelectionHeight, 12, ColorSelection);
+			const int nTextWidth = nWidth - 24;
 
-			const TUIFont& Font = FitFont(*m_pCanvas, pText, nWidth - 20, TitleFonts);
-			DrawScrollingText(Font, pText, nCenterY - Font.nHeight / 2, ColorText, nWidth / 2 - 10, nTicks, nWidth - 20);
+			// Without a value, the name alone in the larger font
+			if (!*pValue)
+			{
+				const TUIFont& Font = FitFont(*m_pCanvas, pName, nTextWidth, SelectedFonts);
+				DrawScrollingText(Font, pName, nCenterY - Font.nHeight / 2, ColorText, nWidth / 2, nTicks, nTextWidth);
+				continue;
+			}
+
+			// The name small above the value; a value that is still to be applied in the accent colour
+			const TUIFont& NameFont = FitFont(*m_pCanvas, pName, nTextWidth, RowFonts);
+			DrawScrollingText(NameFont, pName, nY + 6 + FontSmall.nHeight - NameFont.nHeight, ColorTextDim, nWidth / 2, nTicks, nTextWidth);
+
+			const TUIFont& ValueFont = FitFont(*m_pCanvas, pValue, nTextWidth, SelectedFonts);
+			const int nValueY = nY + 6 + FontSmall.nHeight + 2 + (FontMedium.nHeight - ValueFont.nHeight) / 2;
+			DrawScrollingText(ValueFont, pValue, nValueY, Menu.bPending ? ColorAccentText : ColorText, nWidth / 2, nTicks, nTextWidth);
+			continue;
 		}
-		else
+
+		const bool bCurrent = static_cast<int>(nRow) == Menu.nCurrentRow;
+		const TColor NameColor = bCurrent ? ColorAccentText : ColorTextDim;
+		const int nWidth = CCanvas::GetVisibleWidth(nCenterY - nRowHeight / 2 + 4, nCenterY + nRowHeight / 2 - 4, 108);
+
+		if (!*pValue)
 		{
-			const bool bCurrent = static_cast<int>(nRow) == Menu.nCurrentRow;
-			const TColor Color = bCurrent ? ColorAccentText : (nDistance == 1 || nDistance == -1) ? ColorTextDim : ColorTextFaint;
-			const int nWidth = CCanvas::GetVisibleWidth(nCenterY - FontSmall.nHeight / 2, nCenterY + FontSmall.nHeight / 2);
-			const TUIFont& Font = FitFont(*m_pCanvas, pText, nWidth, RowFonts);
-			m_pCanvas->DrawCenteredText(Font, pText, nCenterY - Font.nHeight / 2, Color);
+			const TUIFont& Font = FitFont(*m_pCanvas, pName, nWidth, RowFonts);
+			m_pCanvas->DrawText(Font, pName, CCanvas::Center, nCenterY - Font.nHeight / 2, NameColor, TAlign::Center, nWidth);
+			continue;
 		}
+
+		const int nNameY = nCenterY - FontSmall.nHeight;
+		const TUIFont& NameFont = FitFont(*m_pCanvas, pName, nWidth, RowFonts);
+		m_pCanvas->DrawText(NameFont, pName, CCanvas::Center, nNameY + FontSmall.nHeight - NameFont.nHeight, NameColor, TAlign::Center, nWidth);
+		const TUIFont& ValueFont = FitFont(*m_pCanvas, pValue, nWidth, RowFonts);
+		m_pCanvas->DrawText(ValueFont, pValue, CCanvas::Center, nCenterY + 1, bCurrent ? ColorAccentText : ColorTextFaint, TAlign::Center, nWidth);
 	}
+
+	DrawScrollBar(Menu.nItem, Menu.nItems);
+}
+
+void CUserInterface::DrawScrollBar(size_t nItem, size_t nItems)
+{
+	// Along the right edge; its thumb is as long as the part of the list that is shown, and moves from the top to the
+	// bottom while the selection goes from the first item to the last
+	constexpr float nStartAngle = 42.0f;
+	constexpr float nSweep = 96.0f;
+	constexpr float nMinThumb = 10.0f;
+
+	if (nItems <= 1)
+		return;
+
+	const float nThumb = Utility::Max(nSweep * Utility::Min(static_cast<float>(TMenu::ListRows) / nItems, 1.0f), nMinThumb);
+	const float nPosition = static_cast<float>(Utility::Min(nItem, nItems - 1)) / (nItems - 1);
+	const float nThumbStart = nStartAngle + (nSweep - nThumb) * nPosition;
+
+	m_pCanvas->FillArc(114, 119, nStartAngle, nStartAngle + nSweep, ColorTrack);
+	m_pCanvas->FillArc(114, 119, nThumbStart, nThumbStart + nThumb, ColorAccent);
 }
 
 void CUserInterface::DrawScrollingText(const TUIFont& Font, const char* pText, int nY, TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth)

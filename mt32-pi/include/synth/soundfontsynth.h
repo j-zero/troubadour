@@ -117,6 +117,20 @@ public:
 	bool SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded = nullptr,
 			       TPresetList List = TPresetList::Instruments);
 
+	// The instrument of a MIDI channel; false if it has none
+	bool GetChannelProgram(u8 nChannel, int* pBank, int* pProgram);
+	// Back to the SoundFont's default instrument, which is loaded with the channel's first note
+	void ResetChannelProgram(u8 nChannel);
+
+	// Layers of the MIDI channels (e.g. from a preset). A muted channel doesn't start notes. A split channel plays a
+	// second instrument from the split note upwards, on a synth channel of its own (MIDIChannels + the channel), which
+	// gets the channel's controllers, pitch bend and pressure as well; each note is released where it was started.
+	// Switching the SoundFont removes the layers.
+	static constexpr int NoSplit = -1;
+	void SetChannelMuted(u8 nChannel, bool bMuted);
+	// Returns false if the upper instrument didn't fit into memory; the channel isn't split then
+	bool SetChannelSplit(u8 nChannel, int nSplitNote, int nUpperBank = 0, int nUpperProgram = 0);
+
 	// Instruments of the current SoundFont whose samples are kept in memory, so that selecting them doesn't load
 	// anything (e.g. those of the presets); replaces the ones kept before. Instruments are kept in the order given
 	// while they fit into memory; returns how many were. Switching the SoundFont releases them.
@@ -189,6 +203,17 @@ private:
 	int m_DefaultBanks[MIDIChannels];
 	int m_DefaultPrograms[MIDIChannels];
 	u16 m_nDefaultProgramMask;
+
+	// Channel layers: muted channels, split notes and upper instruments, and where each sounding note was started
+	enum TNoteLayer : u8 { LayerNone, LayerLower, LayerUpper };
+	u16 m_nMutedMask;
+	s16 m_SplitNotes[MIDIChannels];
+	TPreset m_UpperPresets[MIDIChannels];
+	u8 m_NoteLayers[MIDIChannels][128];
+
+	// Must be called with the synth lock held
+	void ResetLayers();
+	void ReselectUpperPrograms();
 
 	// Instruments pinned with SetPinnedInstruments()
 	TPreset m_PinnedInstruments[MaxPinnedInstruments];

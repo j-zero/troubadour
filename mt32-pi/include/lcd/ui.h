@@ -50,31 +50,25 @@ public:
 		Error,
 	};
 
+	// A list with the selected item in the middle row. Each item has a name and, in a line below it, its value (if it
+	// has one); a bar along the edge shows how far the list is scrolled.
 	struct TMenu
 	{
-		enum class TType
-		{
-			List,
-			Parameter,
-		};
-
-		// Lists show the selected item in the middle row
-		static constexpr size_t ListRows = 5;
+		static constexpr size_t ListRows = 3;
 		static constexpr size_t SelectedRow = ListRows / 2;
 		static constexpr size_t TextLength = 48;
 
-		TType Type;
 		char Title[TextLength];
 
-		// List: items around the selection; empty rows are left blank
-		char Rows[ListRows][TextLength];
+		// Items around the selection; empty rows are left blank
+		char Names[ListRows][TextLength];
+		char Values[ListRows][TextLength];
 		int nCurrentRow;	// Row of the item that is in use, which is highlighted; -1 for none
+		bool bPending;		// The selected item's value is a choice that is applied by pressing the encoder
 
-		// Parameter: value with a gauge
-		char Value[TextLength];
-		float nFraction;
-		u8 nPage;
-		u8 nPages;
+		// Position of the selection, for the scroll bar
+		size_t nItem;
+		size_t nItems;
 	};
 
 	CUserInterface();
@@ -150,7 +144,9 @@ private:
 	void DrawMessage(const char* pMessage, CCanvas::TColor Color, bool bSpinner, unsigned int nTicks);
 	void DrawLoadProgress(u64 nLoadedBytes, u64 nTotalBytes, int nInnerRadius, int nOuterRadius, int nPercentY);
 	void DrawWrappedText(const TUIFont& Font, const char* pText, int nCenterY, CCanvas::TColor Color, size_t nMaxLines, int nRadius = CCanvas::TextRadius);
-	void DrawMenu(const TMenu& Menu, unsigned int nTicks);	void DrawScrollingText(const TUIFont& Font, const char* pText, int nY, CCanvas::TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth = -1);
+	void DrawMenu(const TMenu& Menu, unsigned int nTicks);
+	void DrawScrollBar(size_t nItem, size_t nItems);
+	void DrawScrollingText(const TUIFont& Font, const char* pText, int nY, CCanvas::TColor Color, int nRadius, unsigned int nTicks, int nMaxWidth = -1);
 	void DrawSysExBitmap();
 
 	static constexpr size_t SystemMessageTextBufferSize = 256;

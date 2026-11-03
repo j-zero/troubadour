@@ -25,39 +25,19 @@ FONTS = [
 ]
 
 FIRST_CHAR = 32
-LAST_CHAR  = 127
+LAST_CHAR  = 129
 
-# Symbols drawn instead of the font's characters
-FLOPPY_DISK = 127
-
-
-def render_floppy_disk(font):
-	# As tall as the capital letters, standing on the baseline; drawn at 4x and scaled down for smooth edges
-	_, top, _, bottom = font.getbbox("H", anchor="ls")
-	size = bottom - top
-	scale = 4
-	s = size * scale
-
-	big = Image.new("L", (s, s), 0)
-	draw = ImageDraw.Draw(big)
-	corner = s // 5
-	draw.polygon([(0, 0), (s - corner, 0), (s - 1, corner), (s - 1, s - 1), (0, s - 1)], fill=255)
-
-	# Shutter at the top (with its window) and label at the bottom
-	draw.rectangle((s * 0.22, 0, s * 0.70, s * 0.34), fill=0)
-	draw.rectangle((s * 0.50, s * 0.06, s * 0.62, s * 0.28), fill=255)
-	draw.rectangle((s * 0.16, s * 0.52, s * 0.84, s * 0.88), fill=0)
-
-	image = big.resize((size, size), Image.LANCZOS)
-	return image, 1, -size, size + 3
+# Symbols after the ASCII characters, taken from the font's Unicode characters
+SYMBOLS = {
+	127: "→",	# Rightwards arrow: opens a submenu
+	128: "←",	# Leftwards arrow: back
+	129: "↵",	# Downwards arrow with corner leftwards: press to apply
+}
 
 
 def render_glyph(font, code):
 	# The glyph's image, its position from the pen position on the baseline, and the advance
-	if code == FLOPPY_DISK:
-		return render_floppy_disk(font)
-
-	char = chr(code)
+	char = SYMBOLS.get(code, chr(code))
 	advance = round(font.getlength(char))
 	x0, y0, x1, y1 = font.getbbox(char, anchor="ls")
 	width, height = max(x1 - x0, 0), max(y1 - y0, 0)
@@ -102,7 +82,7 @@ def render_font(name, filename, size, out):
 
 	out.write(f"static const TUIGlyph {name}Glyphs[] =\n{{\n")
 	for code, (offset, width, height, x, y, advance) in zip(range(FIRST_CHAR, LAST_CHAR + 1), glyphs):
-		comment = "floppy disk" if code == FLOPPY_DISK else chr(code).replace("\\", "backslash")
+		comment = f"U+{ord(SYMBOLS[code]):04X}" if code in SYMBOLS else chr(code).replace("\\", "backslash")
 		out.write(f"\t{{ {offset:6d}, {width:3d}, {height:3d}, {x:3d}, {y:3d}, {advance:3d} }},\t// {comment}\n")
 	out.write("};\n\n")
 

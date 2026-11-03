@@ -268,12 +268,18 @@ CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
 	  m_DefaultPrograms{0},
 	  m_nDefaultProgramMask(0),
 
+	  m_nMutedMask(0),
+	  m_SplitNotes{},
+	  m_UpperPresets{},
+	  m_NoteLayers{},
+
 	  m_PinnedInstruments{},
 	  m_nPinnedInstruments(0),
 
 	  m_DisplayInfoLock(TASK_LEVEL),
 	  m_DisplayInfo{}
 {
+	ResetLayers();
 }
 
 CSoundFontSynth::~CSoundFontSynth()
@@ -349,6 +355,9 @@ bool CSoundFontSynth::Initialize()
 	fluid_settings_setint(m_pSettings, "synth.threadsafe-api", false);
 	fluid_settings_setint(m_pSettings, "synth.dynamic-sample-loading", pConfig->FluidSynthDynamicSamples);
 
+	// A second set of channels for the upper instruments of split channels
+	fluid_settings_setint(m_pSettings, "synth.midi-channels", MIDIChannels * 2);
+
 	s_pSynthLock = &m_Lock;
 
 	if (!Reinitialize(pSoundFontPath, &FXProfile))
@@ -365,6 +374,13 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 	const u8 nData1   = (nMessage >> 8) & 0xFF;
 	const u8 nData2   = (nMessage >> 16) & 0xFF;
 
+	const u8 nType    = nStatus & 0xF0;
+	const u8 nUpper   = MIDIChannels + nChannel;
+
+	// A muted channel doesn't start notes, and they aren't shown
+	if (nType == 0x90 && nData2 && (m_nMutedMask & (1 << nChannel)))
+		return;
+
 	CTaskLockHolder TaskLock(m_TaskLock);
 	CSampleLoadReporter LoadReporter(m_pUI);
 
@@ -374,6 +390,7 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 		m_Lock.Acquire();
 		fluid_synth_system_reset(m_pSynth);
 		UpdateDefaultPrograms();
+		ReselectUpperPrograms();
 		m_Lock.Release();
 		return;
 	}
@@ -381,28 +398,45 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 	m_Lock.Acquire();
 
 	// Handle channel messages
-	switch (nStatus & 0xF0)
+	switch (nType)
 	{
-		// Note off
+		// Note off (also a note on with velocity 0), where the note was started
 		case 0x80:
-			fluid_synth_noteoff(m_pSynth, nChannel, nData1);
-			break;
-
-		// Note on
 		case 0x90:
-			if (nData2 && (m_nDefaultProgramMask & (1 << nChannel)))
+		{
+			u8& nLayer = m_NoteLayers[nChannel][nData1 & 0x7F];
+			if (nType == 0x80 || !nData2)
+			{
+				fluid_synth_noteoff(m_pSynth, nLayer == LayerUpper ? nUpper : nChannel, nData1);
+				nLayer = LayerNone;
+				break;
+			}
+
+			// From the split note upwards, the upper instrument
+			const int nSplit = m_SplitNotes[nChannel];
+			if (nSplit != NoSplit && nData1 >= nSplit)
+			{
+				nLayer = LayerUpper;
+				fluid_synth_noteon(m_pSynth, nUpper, nData1, nData2);
+				break;
+			}
+
+			nLayer = LayerLower;
+			if (m_nDefaultProgramMask & (1 << nChannel))
 				LoadDefaultProgram(nChannel);
 			fluid_synth_noteon(m_pSynth, nChannel, nData1, nData2);
 			break;
+		}
 
 		// Polyphonic key pressure/aftertouch
 		case 0xA0:
-			fluid_synth_key_pressure(m_pSynth, nChannel, nData1, nData2);
+			fluid_synth_key_pressure(m_pSynth, m_NoteLayers[nChannel][nData1 & 0x7F] == LayerUpper ? nUpper : nChannel, nData1, nData2);
 			break;
 
-		// Control change
+		// Control change; the upper channel follows, so that it is in the same state when the channel is split
 		case 0xB0:
 			fluid_synth_cc(m_pSynth, nChannel, nData1, nData2);
+			fluid_synth_cc(m_pSynth, nUpper, nData1, nData2);
 			break;
 
 		// Program change
@@ -416,11 +450,13 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 		// Channel pressure/aftertouch
 		case 0xD0:
 			fluid_synth_channel_pressure(m_pSynth, nChannel, nData1);
+			fluid_synth_channel_pressure(m_pSynth, nUpper, nData1);
 			break;
 
 		// Pitch bend
 		case 0xE0:
 			fluid_synth_pitch_bend(m_pSynth, nChannel, (nData2 << 7) | nData1);
+			fluid_synth_pitch_bend(m_pSynth, nUpper, (nData2 << 7) | nData1);
 			break;
 	}
 
@@ -442,6 +478,7 @@ void CSoundFontSynth::HandleMIDISysExMessage(const u8* pData, size_t nSize)
 	m_Lock.Acquire();
 	fluid_synth_sysex(m_pSynth, reinterpret_cast<const char*>(pData + 1), nSize - 2, nullptr, nullptr, nullptr, false);
 	UpdateDefaultPrograms();
+	ReselectUpperPrograms();
 	m_Lock.Release();
 }
 
@@ -672,6 +709,131 @@ bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nCha
 		*pSamplesLoaded = LoadReporter.SamplesLoaded();
 
 	return !bOutOfMemory;
+}
+
+bool CSoundFontSynth::GetChannelProgram(u8 nChannel, int* pBank, int* pProgram)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+	m_Lock.Acquire();
+	fluid_preset_t* pPreset = fluid_synth_get_channel_preset(m_pSynth, nChannel);
+	if (pPreset)
+	{
+		*pBank = fluid_preset_get_banknum(pPreset);
+		*pProgram = fluid_preset_get_num(pPreset);
+	}
+	m_Lock.Release();
+
+	return pPreset != nullptr;
+}
+
+void CSoundFontSynth::ResetChannelProgram(u8 nChannel)
+{
+	if (nChannel >= MIDIChannels)
+		return;
+
+	CTaskLockHolder TaskLock(m_TaskLock);
+	m_Lock.Acquire();
+	fluid_synth_all_notes_off(m_pSynth, nChannel);
+	fluid_synth_unset_program(m_pSynth, nChannel);
+	m_nDefaultProgramMask |= 1 << nChannel;
+	if (nChannel == 0)
+		UpdateProgramName();
+	m_Lock.Release();
+}
+
+void CSoundFontSynth::SetChannelMuted(u8 nChannel, bool bMuted)
+{
+	if (nChannel >= MIDIChannels || bMuted == !!(m_nMutedMask & (1 << nChannel)))
+		return;
+
+	CTaskLockHolder TaskLock(m_TaskLock);
+	m_Lock.Acquire();
+	if (bMuted)
+	{
+		m_nMutedMask |= 1 << nChannel;
+
+		// Its notes end as if released
+		fluid_synth_all_notes_off(m_pSynth, nChannel);
+		fluid_synth_all_notes_off(m_pSynth, MIDIChannels + nChannel);
+		memset(m_NoteLayers[nChannel], LayerNone, sizeof(m_NoteLayers[nChannel]));
+	}
+	else
+		m_nMutedMask &= ~(1 << nChannel);
+	m_Lock.Release();
+}
+
+bool CSoundFontSynth::SetChannelSplit(u8 nChannel, int nSplitNote, int nUpperBank, int nUpperProgram)
+{
+	if (nChannel >= MIDIChannels)
+		return false;
+
+	CTaskLockHolder TaskLock(m_TaskLock);
+	CSampleLoadReporter LoadReporter(m_pUI);
+	const u8 nUpper = MIDIChannels + nChannel;
+
+	if (nSplitNote < 0 || nSplitNote > 127 || nUpperBank < 0 || nUpperBank > 0xFFFF || nUpperProgram < 0 || nUpperProgram > 127)
+		nSplitNote = NoSplit;
+
+	m_Lock.Acquire();
+
+	// The upper instrument only changes (and loads) if it is another one
+	const bool bWasSplit = m_SplitNotes[nChannel] != NoSplit;
+	const TPreset& Upper = m_UpperPresets[nChannel];
+	const bool bSameUpper = bWasSplit && nSplitNote != NoSplit && Upper.nBank == nUpperBank && Upper.nProgram == nUpperProgram;
+
+	bool bResult = true;
+	if (!bSameUpper)
+	{
+		// The upper notes that are sounding end as if released; then the old instrument's samples can be freed
+		if (bWasSplit)
+		{
+			fluid_synth_all_notes_off(m_pSynth, nUpper);
+			fluid_synth_unset_program(m_pSynth, nUpper);
+			for (u8& nLayer : m_NoteLayers[nChannel])
+				if (nLayer == LayerUpper)
+					nLayer = LayerNone;
+		}
+
+		if (nSplitNote != NoSplit)
+		{
+			const unsigned nFailedAllocs = s_nFailedAllocs;
+			const bool bSelected = fluid_synth_program_select(m_pSynth, nUpper, m_nSoundFontID, nUpperBank, nUpperProgram) == FLUID_OK;
+			if (!bSelected || s_nFailedAllocs != nFailedAllocs)
+			{
+				LOGERR("Couldn't load instrument %d:%d for the split of channel %d", nUpperBank, nUpperProgram, nChannel + 1);
+				fluid_synth_unset_program(m_pSynth, nUpper);
+				nSplitNote = NoSplit;
+				bResult = false;
+			}
+			else
+				m_UpperPresets[nChannel] = { static_cast<u16>(nUpperBank), static_cast<u8>(nUpperProgram) };
+		}
+	}
+
+	m_SplitNotes[nChannel] = nSplitNote;
+	m_Lock.Release();
+
+	return bResult;
+}
+
+void CSoundFontSynth::ResetLayers()
+{
+	m_nMutedMask = 0;
+	for (s16& nSplit : m_SplitNotes)
+		nSplit = NoSplit;
+	memset(m_NoteLayers, LayerNone, sizeof(m_NoteLayers));
+}
+
+void CSoundFontSynth::ReselectUpperPrograms()
+{
+	// Resets select the default programs on all channels, also on the upper ones
+	for (u8 nChannel = 0; nChannel < MIDIChannels; ++nChannel)
+	{
+		if (m_SplitNotes[nChannel] == NoSplit)
+			continue;
+		const TPreset& Upper = m_UpperPresets[nChannel];
+		fluid_synth_program_select(m_pSynth, MIDIChannels + nChannel, m_nSoundFontID, Upper.nBank, Upper.nProgram);
+	}
 }
 
 size_t CSoundFontSynth::SetPinnedInstruments(const int* pBanks, const int* pPrograms, size_t nCount)
@@ -921,6 +1083,7 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 	FreePresetLists();
 	m_nSoundFontID        = FLUID_FAILED;
 	m_nDefaultProgramMask = 0;
+	ResetLayers();
 
 	m_pSynth = new_fluid_synth(m_pSettings);
 

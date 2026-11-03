@@ -52,6 +52,8 @@ extern const TUIFont FontMedium;
 extern const TUIFont FontLarge;
 
 // Symbols in the fonts, after the ASCII characters (as strings, to be put into text)
-#define UI_SYMBOL_FLOPPY_DISK "\x7F"
+#define UI_SYMBOL_ARROW_RIGHT "\x7F"	// Opens a submenu
+#define UI_SYMBOL_ARROW_LEFT  "\x80"	// Back
+#define UI_SYMBOL_ENTER       "\x81"	// Press to apply
 
 #endif

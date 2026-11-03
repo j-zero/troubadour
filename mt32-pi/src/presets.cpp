@@ -178,6 +178,21 @@ void CPresets::Clear(TPreset& Preset)
 	Preset.nTPTranspose = Preset.nTPBendMode = Preset.nTPBendRange = Preset.nTPChannelMode = Unknown;
 	for (int& nLevel : Preset.TPSensitivity)
 		nLevel = Unknown;
+	for (TChannel& Channel : Preset.Channels)
+		Clear(Channel);
+}
+
+void CPresets::Clear(TChannel& Channel)
+{
+	Channel.bEnabled = true;
+	Channel.nBank = Channel.nProgram = Unknown;
+	Channel.nSplitNote = NoSplit;
+	Channel.nUpperBank = Channel.nUpperProgram = Unknown;
+}
+
+bool CPresets::IsDefault(const TChannel& Channel)
+{
+	return Channel.bEnabled && Channel.nProgram == Unknown && Channel.nSplitNote == NoSplit;
 }
 
 void CPresets::MakePath(const TEntry& Entry, char* pBuffer, size_t nSize) const
@@ -228,6 +243,9 @@ bool CPresets::SaveFile(TEntry& Entry)
 	// The text is made before writing; tasks only switch while the file is being written
 	Line.Format("# Preset, saved automatically while it is current. Effects as in mt32-pi.cfg;\n"
 		    "# tp_transpose in semitones, tp_sensitivity_1 (high E) to _6 from 1 to 16.\n"
+		    "# channel_N (1-16): on/off; channel_N_instrument: bank:program (otherwise the\n"
+		    "# preset's for channels 1-6, the SoundFont's default for the others);\n"
+		    "# channel_N_split: MIDI note (60 = C4) from which channel_N_upper plays.\n"
 		    "[%s]\nname = %s\nsoundfont = %s\nbank = %d\nprogram = %d\n",
 		    PresetSection, Preset.Name, Preset.SoundFontPath, Preset.nBank, Preset.nProgram);
 	Text.Append(Line);
@@ -270,6 +288,28 @@ bool CPresets::SaveFile(TEntry& Entry)
 		if (Preset.TPSensitivity[nString] != Unknown)
 		{
 			Line.Format("tp_sensitivity_%u = %d\n", nString + 1, Preset.TPSensitivity[nString]);
+			Text.Append(Line);
+		}
+	}
+
+	// Only what differs from the default
+	for (u8 nChannel = 0; nChannel < MIDIChannels; ++nChannel)
+	{
+		const TChannel& Channel = Preset.Channels[nChannel];
+		if (!Channel.bEnabled)
+		{
+			Line.Format("channel_%u = off\n", nChannel + 1);
+			Text.Append(Line);
+		}
+		if (Channel.nProgram != Unknown)
+		{
+			Line.Format("channel_%u_instrument = %d:%d\n", nChannel + 1, Channel.nBank, Channel.nProgram);
+			Text.Append(Line);
+		}
+		if (Channel.nSplitNote != NoSplit)
+		{
+			Line.Format("channel_%u_split = %d\nchannel_%u_upper = %d:%d\n", nChannel + 1, Channel.nSplitNote,
+				    nChannel + 1, Channel.nUpperBank, Channel.nUpperProgram);
 			Text.Append(Line);
 		}
 	}
@@ -329,6 +369,50 @@ int CPresets::INIHandler(void* pUser, const char* pSection, const char* pName, c
 			Preset.bHasEffects = true;
 			return CConfig::ParseOption(pValue, &Preset.Effects[nEffect]);
 		}
+	}
+
+	// channel_N, channel_N_instrument, channel_N_split, channel_N_upper
+	static constexpr char ChannelKey[] = "channel_";
+	constexpr size_t nChannelKeyLength = sizeof(ChannelKey) - 1;
+	if (!strncmp(pName, ChannelKey, nChannelKeyLength))
+	{
+		char* pEnd;
+		const long nChannel = strtol(pName + nChannelKeyLength, &pEnd, 10);
+		if (nChannel < 1 || nChannel > MIDIChannels || pEnd == pName + nChannelKeyLength)
+			return 0;
+		TChannel& Channel = Preset.Channels[nChannel - 1];
+
+		// "bank:program"
+		auto ParseInstrument = [pValue](int& nBank, int& nProgram)
+		{
+			char* pColon;
+			const long nParsedBank = strtol(pValue, &pColon, 10);
+			if (*pColon != ':')
+				return 0;
+			char* pProgramEnd;
+			const long nParsedProgram = strtol(pColon + 1, &pProgramEnd, 10);
+			if (*pProgramEnd || nParsedBank < 0 || nParsedBank > 0xFFFF || nParsedProgram < 0 || nParsedProgram > 127)
+				return 0;
+			nBank = nParsedBank;
+			nProgram = nParsedProgram;
+			return 1;
+		};
+
+		if (!*pEnd)
+			return CConfig::ParseOption(pValue, &Channel.bEnabled);
+		if (!strcmp(pEnd, "_instrument"))
+			return ParseInstrument(Channel.nBank, Channel.nProgram);
+		if (!strcmp(pEnd, "_upper"))
+			return ParseInstrument(Channel.nUpperBank, Channel.nUpperProgram);
+		if (!strcmp(pEnd, "_split"))
+		{
+			int nNote;
+			if (!CConfig::ParseOption(pValue, &nNote) || nNote < 0 || nNote > 127)
+				return 0;
+			Channel.nSplitNote = nNote;
+			return 1;
+		}
+		return 0;
 	}
 
 	int* pInt = !strcmp(pName, "bank") ? &Preset.nBank

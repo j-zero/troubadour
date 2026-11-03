@@ -51,14 +51,27 @@ public:
 	};
 
 	// A list with the selected item in the middle row. Each item has a name and, in a line below it, its value (if it
-	// has one); a bar along the edge shows how far the list is scrolled.
+	// has one); a bar along the edge shows how far the list is scrolled. Or a value: the setting's name above it, with
+	// a gauge if it has a range.
 	struct TMenu
 	{
+		enum class TType
+		{
+			List,
+			Value,
+		};
+
 		static constexpr size_t ListRows = 3;
 		static constexpr size_t SelectedRow = ListRows / 2;
 		static constexpr size_t TextLength = 48;
 
+		TType Type;
 		char Title[TextLength];
+
+		// Value: the value, how far it is in its range (negative for no gauge); nItem and nItems give the setting's
+		// position in its list
+		char Value[TextLength];
+		float nFraction;
 
 		// Items around the selection; empty rows are left blank
 		char Names[ListRows][TextLength];
@@ -94,8 +107,6 @@ public:
 	void DisplayImage(TImage Image);
 	void ShowSysExText(TSysExDisplayMessage Type, const u8* pMessage, size_t nSize, u8 nOffset);
 	void ShowSysExBitmap(TSysExDisplayMessage Type, const u8* pData, size_t nSize);
-	void EnterPowerSavingMode();
-	void ExitPowerSavingMode();
 
 	// Shown until hidden or replaced by a message
 	void ShowMenu(const TMenu& Menu);
@@ -132,8 +143,6 @@ private:
 		DisplayingSysExText,
 		DisplayingSysExBitmap,
 		DisplayingMenu,
-		EnteringPowerSavingMode,
-		InPowerSavingMode
 	};
 
 	void DrawLogo(int nY);

@@ -96,15 +96,20 @@ private:
 	// Settings are saved once they haven't changed for this long, so that turning the encoder doesn't write each step
 	static constexpr unsigned LastStateSaveDelayMillis = 2000;
 
-	// Menus of the simple_encoder scheme: the first encoder selects the instrument from a list. Pressing the second
-	// one opens the settings, with submenus: the first encoder selects an item, the second one changes its value
-	// right away, and pressing the second one opens a submenu or does what the item says. A value chosen from a list
-	// (e.g. an instrument, which may take a while to load) is applied by pressing the second encoder.
+	// Menus of the simple_encoder scheme. Outside of the settings, the first encoder selects the instrument from a
+	// list and the second one changes the volume; pressing the second one opens the settings. There, the second
+	// encoder moves through the items, and pressing it opens the highlighted one: a submenu, a list to choose from,
+	// or a screen on which the second encoder changes the value. The first encoder changes the highlighted item's
+	// value right away (quick edit; a choice from a list, which may take a while to load, is applied by pressing
+	// either encoder), and pressing it goes back. Holding the first encoder goes to the home screen, holding the
+	// second one to the main menu of the settings.
 	enum class TMenu
 	{
 		None,
 		Instruments,
-		Settings,
+		Settings,	// The items of a settings page
+		Value,		// The value of a setting
+		Choice,		// The list a setting's value is chosen from
 	};
 
 	static constexpr unsigned MenuTimeoutMillis = 8000;
@@ -150,6 +155,11 @@ private:
 	static constexpr u8 SettingChInstrument     = SettingChEnabled + 1;
 	static constexpr u8 SettingChSplit          = SettingChInstrument + 1;
 	static constexpr u8 SettingChUpper          = SettingChSplit + 1;
+	// The channel's transpose, below the split note (or for all notes) and from it upwards
+	static constexpr u8 SettingChOctave         = SettingChUpper + 1;
+	static constexpr u8 SettingChSemitones      = SettingChOctave + 1;
+	static constexpr u8 SettingChUpperOctave    = SettingChSemitones + 1;
+	static constexpr u8 SettingChUpperSemitones = SettingChUpperOctave + 1;
 
 	// Settings > Preset holds what is stored in the current preset, Settings > Global everything else
 	enum class TSettingsPage
@@ -220,6 +230,7 @@ private:
 	void ProcessEventQueue();
 	void ProcessButtonEvent(const TButtonEvent& Event);
 	void ProcessFootswitchEvent(const TButtonEvent& Event);
+	void ProcessEncoderButtonEvent(const TButtonEvent& Event);
 	void ProcessEncoder2ButtonEvent(const TButtonEvent& Event);
 	void ProcessEncoderEvent(const TEncoderEvent& Event);
 
@@ -232,14 +243,19 @@ private:
 	size_t GetSettingsItems(u8* pItems) const;
 	int FindSettingsItem(u8 nSetting) const;
 	void OpenSettingsPage(TSettingsPage Page, u8 nSelectedSetting);
-	bool IsSettingsMenu() const { return m_Menu == TMenu::Settings; }
+	bool IsSettingsMenu() const { return m_Menu == TMenu::Settings || m_Menu == TMenu::Value || m_Menu == TMenu::Choice; }
+	// Settings that have a value that is changed on a screen of its own
+	bool HasValueScreen(u8 nSetting);
+	// With the encoder, faster when turned quickly
+	void ChangeSettingByEncoder(u8 nSetting, int nDelta);
+	void ApplyPendingSetting();
 	// Pressing the second encoder on an item: opens a submenu or does what it says
 	void OpenSetting(u8 nSetting);
 	// Turning the second encoder on an item: changes its value, or chooses from its list
 	void ChangeSetting(u8 nSetting, int nDelta);
 	// Settings whose value is chosen from a list, and applied by pressing the encoder
 	bool IsListSetting(u8 nSetting) const;
-	size_t GetSettingListCount(u8 nSetting);
+	size_t GetSettingListCount(u8 nSetting) const;
 	size_t GetSettingListIndex(u8 nSetting);
 	void FormatSettingListItem(u8 nSetting, size_t nIndex, char* pBuffer, size_t nSize);
 	void ApplySettingListItem(u8 nSetting, size_t nIndex);
@@ -272,6 +288,8 @@ private:
 	void SelectMenuInstrument();
 	void ChangeParameter(int nDelta);
 	static void FormatNote(int nNote, char* pBuffer, size_t nSize);
+	// "+1 oct", "-2", "+1 oct +3" (semitones beyond the octaves)
+	static void FormatTranspose(int nSemitones, char* pBuffer, size_t nSize);
 	// Actions that can be triggered via events
 	void SwitchSoundFont(size_t nIndex);
 	void DeferSwitchSoundFont(size_t nIndex);
@@ -329,7 +347,10 @@ private:
 	size_t m_nDeferredSoundFontSwitchIndex;
 	unsigned m_nDeferredSoundFontSwitchTime;
 
-	// The second encoder's button acts when released; held, it leaves the settings
+	// The encoders' buttons act when released; held, the first one goes to the home screen, the second one to the
+	// main menu of the settings
+	bool m_bEncoderButtonHeld;
+	bool m_bEncoderLongPress;
 	bool m_bEncoder2ButtonHeld;
 	bool m_bEncoder2LongPress;
 

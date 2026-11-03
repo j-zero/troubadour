@@ -37,8 +37,9 @@
 #define MT32_PI_NAME "Troubadour"
 
 // Set from the git tag when building
+// Not shown if unknown (e.g. when built without the git repository)
 #ifndef MT32_PI_VERSION
-#define MT32_PI_VERSION "<unknown>"
+#define MT32_PI_VERSION ""
 #endif
 LOGMODULE(MT32_PI_NAME);
 
@@ -103,6 +104,8 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_nDeferredSoundFontSwitchIndex(0),
 	  m_nDeferredSoundFontSwitchTime(0),
 
+	  m_bEncoderButtonHeld(false),
+	  m_bEncoderLongPress(false),
 	  m_bEncoder2ButtonHeld(false),
 	  m_bEncoder2LongPress(false),
 
@@ -536,7 +539,7 @@ void CMT32Pi::MainTask()
 		{
 			m_UserInterface.NotifyActivity();
 			UpdateTriplePlayStatus();
-			if (m_Menu == TMenu::Settings)
+			if (IsSettingsMenu())
 				UpdateMenu();
 
 			// Its bend mode and transpose belong to the current preset
@@ -695,18 +698,17 @@ void CMT32Pi::Run(unsigned nCore)
 	}
 }
 
+// The display isn't turned off here; only its standby setting does that
 void CMT32Pi::OnEnterPowerSavingMode()
 {
 	CPower::OnEnterPowerSavingMode();
 	m_pSound->Cancel();
-	m_UserInterface.EnterPowerSavingMode();
 }
 
 void CMT32Pi::OnExitPowerSavingMode()
 {
 	CPower::OnExitPowerSavingMode();
 	m_pSound->Start();
-	m_UserInterface.ExitPowerSavingMode();
 }
 
 void CMT32Pi::OnThrottleDetected()
@@ -1088,6 +1090,12 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 		return;
 	}
 
+	if (Event.Button == TButton::EncoderButton)
+	{
+		ProcessEncoderButtonEvent(Event);
+		return;
+	}
+
 	if (!Event.bPressed)
 		return;
 
@@ -1099,27 +1107,69 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 			LCDLog(TLCDLogType::Notice, "Volume: %d", m_nMasterVolume);
 			break;
 
-		// Instrument list: select the highlighted instrument; settings: leave them
-		case TButton::EncoderButton:
-			if (Event.bRepeat)
-				break;
-
-			if (m_Menu == TMenu::Instruments)
-				SelectMenuInstrument();
-			else if (IsSettingsMenu())
-				CloseMenu();
-			else
-				OpenMenu(TMenu::Instruments);
-			break;
-
 		default:
 			break;
 	}
 }
 
+void CMT32Pi::ProcessEncoderButtonEvent(const TButtonEvent& Event)
+{
+	// A long press goes to the home screen (the settings open at the same item the next time); a short one acts when
+	// released
+	if (Event.bPressed)
+	{
+		if (!Event.bRepeat)
+		{
+			m_bEncoderButtonHeld = true;
+			m_bEncoderLongPress = false;
+		}
+		else if (m_bEncoderButtonHeld && !m_bEncoderLongPress)
+		{
+			m_bEncoderLongPress = true;
+			if (m_Menu != TMenu::None)
+				CloseMenu(IsSettingsMenu());
+		}
+		return;
+	}
+
+	const bool bShortPress = m_bEncoderButtonHeld && !m_bEncoderLongPress;
+	m_bEncoderButtonHeld = false;
+	if (!bShortPress)
+		return;
+
+	switch (m_Menu)
+	{
+		// The instrument list, and selecting the highlighted instrument
+		case TMenu::None:
+			OpenMenu(TMenu::Instruments);
+			return;
+
+		case TMenu::Instruments:
+			SelectMenuInstrument();
+			return;
+
+		// Back to the list from a value, or from a list to choose from (without choosing)
+		case TMenu::Value:
+		case TMenu::Choice:
+			OpenMenu(TMenu::Settings);
+			return;
+
+		// A choice made with this encoder is applied; otherwise back to the menu above (from the main menu of the
+		// settings, to the home screen)
+		case TMenu::Settings:
+			if (m_nPendingSetting != NoPendingSetting)
+				ApplyPendingSetting();
+			else if (m_SettingsPage == TSettingsPage::Root)
+				CloseMenu();
+			else
+				OpenSetting(SettingBack);
+			return;
+	}
+}
+
 void CMT32Pi::ProcessEncoder2ButtonEvent(const TButtonEvent& Event)
 {
-	// A long press leaves the settings; a short one acts when released
+	// A long press goes to the main menu of the settings; a short one acts when released
 	if (Event.bPressed)
 	{
 		if (!Event.bRepeat)
@@ -1130,17 +1180,7 @@ void CMT32Pi::ProcessEncoder2ButtonEvent(const TButtonEvent& Event)
 		else if (m_bEncoder2ButtonHeld && !m_bEncoder2LongPress)
 		{
 			m_bEncoder2LongPress = true;
-			if (IsSettingsMenu())
-			{
-				// From a list, remember its highlighted item
-				if (m_Menu == TMenu::Settings)
-				{
-					u8 Items[MaxSettingsPageItems];
-					if (m_nMenuIndex < GetSettingsItems(Items))
-						m_nSetting = Items[m_nMenuIndex];
-				}
-				CloseMenu(true);
-			}
+			OpenSettingsPage(TSettingsPage::Root, SettingPresetMenu);
 		}
 		return;
 	}
@@ -1150,13 +1190,28 @@ void CMT32Pi::ProcessEncoder2ButtonEvent(const TButtonEvent& Event)
 	if (!bShortPress)
 		return;
 
-	// Settings: apply the value chosen from a list, or open the highlighted item; otherwise open the settings
-	if (m_Menu != TMenu::Settings)
+	switch (m_Menu)
 	{
-		OpenMenu(TMenu::Settings);
-		return;
+		// The settings, or back to their list from a value
+		case TMenu::None:
+		case TMenu::Instruments:
+		case TMenu::Value:
+			OpenMenu(TMenu::Settings);
+			return;
+
+		// The highlighted choice, then back to the list (unless applying it has closed the menu)
+		case TMenu::Choice:
+			if (m_nMenuIndex != m_nMenuCurrentIndex)
+				ApplySettingListItem(m_nSetting, m_nMenuIndex);
+			if (m_Menu == TMenu::Choice)
+				OpenMenu(TMenu::Settings);
+			return;
+
+		case TMenu::Settings:
+			break;
 	}
 
+	// A choice made with the first encoder, or open the highlighted item
 	u8 Items[MaxSettingsPageItems];
 	if (m_nMenuIndex >= GetSettingsItems(Items))
 		return;
@@ -1186,39 +1241,87 @@ void CMT32Pi::ProcessFootswitchEvent(const TButtonEvent& Event)
 
 void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
 {
-	// The first encoder moves through the settings, otherwise through the instruments
-	if (Event.nEncoder == 0)
+	const bool bFirst = Event.nEncoder == 0;
+
+	switch (m_Menu)
 	{
-		if (m_Menu == TMenu::Settings)
+		// The first encoder moves through the instruments, the second one changes the volume
+		case TMenu::None:
+		case TMenu::Instruments:
+			if (bFirst)
+				MoveInstrumentSelection(Event.nDelta);
+			else
+			{
+				m_SettingsPage = TSettingsPage::Global;
+				m_nSetting = SettingVolume;
+				OpenMenu(TMenu::Value);
+				ChangeSettingByEncoder(SettingVolume, Event.nDelta);
+			}
+			return;
+
+		// Either encoder changes the value, or moves through the list to choose from
+		case TMenu::Value:
+			ChangeSettingByEncoder(m_nSetting, Event.nDelta);
+			return;
+
+		case TMenu::Choice:
 			MoveListSelection(Event.nDelta);
-		else
-			MoveInstrumentSelection(Event.nDelta);
-		return;
+			return;
+
+		// The second encoder moves through the items, the first one changes the highlighted one's value
+		case TMenu::Settings:
+		{
+			if (!bFirst)
+			{
+				MoveListSelection(Event.nDelta);
+				return;
+			}
+
+			u8 Items[MaxSettingsPageItems];
+			if (m_nMenuIndex < GetSettingsItems(Items))
+				ChangeSettingByEncoder(Items[m_nMenuIndex], Event.nDelta);
+			return;
+		}
 	}
+}
 
-	// The second encoder changes the selected item's value; outside of the settings, the volume
-	if (m_Menu != TMenu::Settings)
-		OpenSettingsPage(TSettingsPage::Global, SettingVolume);
-
-	u8 Items[MaxSettingsPageItems];
-	if (m_nMenuIndex >= GetSettingsItems(Items))
-		return;
-	const u8 nSetting = Items[m_nMenuIndex];
-
+void CMT32Pi::ChangeSettingByEncoder(u8 nSetting, int nDelta)
+{
 	// Values and long lists have many steps, so turning quickly makes bigger steps
 	const unsigned int nTicks = CTimer::GetClockTicks();
 	const unsigned int nInterval = nTicks - m_nLastParameterTurnTime;
 	const int nFactor = nInterval < ParameterFastTurnMicros ? 4 : nInterval < ParameterMediumTurnMicros ? 2 : 1;
 	m_nLastParameterTurnTime = nTicks;
 
-	// The number of channels shown and the TriplePlay's settings (and those after them: switches, the standby time,
-	// split notes) have few steps; the effects, the volume and the lists many
+	// The number of channels shown and the TriplePlay's settings (and those after them: switches, the standby time)
+	// have few steps; the effects, the volume, split notes and the lists many
 	const bool bFewSteps = (nSetting == SettingChannels || nSetting >= SettingTPEnabled) && nSetting != SettingChSplit
 			       && !IsListSetting(nSetting);
-	ChangeSetting(nSetting, bFewSteps ? Event.nDelta : Event.nDelta * nFactor);
+	ChangeSetting(nSetting, bFewSteps ? nDelta : nDelta * nFactor);
 
 	m_nMenuTime = m_pTimer->GetTicks();
 	UpdateMenu();
+}
+
+void CMT32Pi::ApplyPendingSetting()
+{
+	if (m_nPendingSetting == NoPendingSetting)
+		return;
+
+	const u8 nSetting = m_nPendingSetting;
+	m_nPendingSetting = NoPendingSetting;
+	ApplySettingListItem(nSetting, m_nPendingIndex);
+}
+
+bool CMT32Pi::HasValueScreen(u8 nSetting)
+{
+	// Not lists, actions, what is only shown, and the channels (which open their settings)
+	if (IsListSetting(nSetting) || nSetting == SettingPresetNew || nSetting == SettingPresetDelete || nSetting == SettingTPBattery
+	    || (nSetting >= SettingChannelFirst && nSetting < SettingChannelFirst + CPresets::MIDIChannels))
+		return false;
+
+	char Value[CUserInterface::TMenu::TextLength];
+	return FormatSettingValue(nSetting, Value, sizeof(Value));
 }
 
 size_t CMT32Pi::GetSettingsItems(u8* pItems) const
@@ -1237,8 +1340,6 @@ size_t CMT32Pi::GetSettingsItems(u8* pItems) const
 
 		// What the current preset holds, the list, and adding and deleting (presets are saved automatically)
 		case TSettingsPage::Preset:
-			if (m_Presets.GetCount())
-				Add(SettingPresetSelect);
 			if (m_nCurrentPreset >= 0)
 			{
 				Add(SettingSoundFont);
@@ -1290,10 +1391,16 @@ size_t CMT32Pi::GetSettingsItems(u8* pItems) const
 		{
 			Add(SettingChEnabled);
 			Add(SettingChInstrument);
+			Add(SettingChOctave);
+			Add(SettingChSemitones);
 			Add(SettingChSplit);
 			const CPresets::TPreset* pPreset = GetCurrentPreset();
 			if (pPreset && pPreset->Channels[m_nEditChannel].nSplitNote != CPresets::NoSplit)
+			{
 				Add(SettingChUpper);
+				Add(SettingChUpperOctave);
+				Add(SettingChUpperSemitones);
+			}
 			Add(SettingBack);
 			break;
 		}
@@ -1363,7 +1470,7 @@ void CMT32Pi::OpenSetting(u8 nSetting)
 
 		// Submenus, and back to the menu that has them
 		case SettingPresetMenu:
-			OpenSettingsPage(TSettingsPage::Preset, m_Presets.GetCount() ? SettingPresetSelect : SettingPresetNew);
+			OpenSettingsPage(TSettingsPage::Preset, m_nCurrentPreset >= 0 ? SettingSoundFont : SettingPresetNew);
 			return;
 		case SettingPresetTPMenu:	OpenSettingsPage(TSettingsPage::PresetTP, SettingTPFirst); return;
 		case SettingChannelsMenu:	OpenSettingsPage(TSettingsPage::Channels, SettingChannelFirst); return;
@@ -1387,18 +1494,29 @@ void CMT32Pi::OpenSetting(u8 nSetting)
 		// Actions; the list shows the result
 		case SettingPresetNew:
 			NewPreset();
-			OpenSettingsPage(TSettingsPage::Preset, SettingPresetSelect);
+			OpenSettingsPage(TSettingsPage::Preset, SettingPresetNew);
 			return;
 
 		case SettingPresetDelete:
 			DeletePreset();
-			OpenSettingsPage(TSettingsPage::Preset, SettingPresetSelect);
+			OpenSettingsPage(TSettingsPage::Preset, SettingSoundFont);
 			return;
 
-		// Values are changed by turning the encoder
 		default:
-			return;
+			break;
 	}
+
+	// A list to choose the value from, or the value on a screen of its own
+	m_nSetting = nSetting;
+	if (IsListSetting(nSetting))
+	{
+		if (GetSettingListCount(nSetting))
+			OpenMenu(TMenu::Choice);
+		else
+			LCDLog(TLCDLogType::Warning, "Nothing to select!");
+	}
+	else if (HasValueScreen(nSetting))
+		OpenMenu(TMenu::Value);
 }
 
 void CMT32Pi::ChangeSetting(u8 nSetting, int nDelta)
@@ -1424,7 +1542,9 @@ void CMT32Pi::ChangeSetting(u8 nSetting, int nDelta)
 	// The settings of a preset's channel
 	const CPresets::TPreset* pPreset = GetCurrentPreset();
 	const bool bChannelRow = nSetting >= SettingChannelFirst && nSetting < SettingChannelFirst + CPresets::MIDIChannels;
-	if (bChannelRow || nSetting == SettingChEnabled || nSetting == SettingChSplit)
+	const bool bTranspose = nSetting == SettingChOctave || nSetting == SettingChSemitones || nSetting == SettingChUpperOctave
+				|| nSetting == SettingChUpperSemitones;
+	if (bChannelRow || nSetting == SettingChEnabled || nSetting == SettingChSplit || bTranspose)
 	{
 		if (!pPreset)
 			return;
@@ -1432,7 +1552,15 @@ void CMT32Pi::ChangeSetting(u8 nSetting, int nDelta)
 		const u8 nChannel = bChannelRow ? nSetting - SettingChannelFirst : m_nEditChannel;
 		CPresets::TChannel Channel = pPreset->Channels[nChannel];
 
-		if (nSetting != SettingChSplit)
+		if (bTranspose)
+		{
+			// Octaves or semitones, within the range
+			const bool bUpper = nSetting == SettingChUpperOctave || nSetting == SettingChUpperSemitones;
+			const bool bOctave = nSetting == SettingChOctave || nSetting == SettingChUpperOctave;
+			int& nTranspose = bUpper ? Channel.nUpperTranspose : Channel.nTranspose;
+			nTranspose = Utility::Clamp(nTranspose + (bOctave ? 12 : 1) * nDelta, -CPresets::MaxChannelTranspose, CPresets::MaxChannelTranspose);
+		}
+		else if (nSetting != SettingChSplit)
 		{
 			// Turning right switches the sound on, left off
 			Channel.bEnabled = nDelta > 0;
@@ -1470,7 +1598,7 @@ bool CMT32Pi::IsListSetting(u8 nSetting) const
 	    || nSetting == SettingDrumKit || nSetting == SettingChInstrument || nSetting == SettingChUpper;
 }
 
-size_t CMT32Pi::GetSettingListCount(u8 nSetting)
+size_t CMT32Pi::GetSettingListCount(u8 nSetting) const
 {
 	using TPresetList = CSoundFontSynth::TPresetList;
 
@@ -1833,6 +1961,8 @@ void CMT32Pi::ApplyPresetChannel(u8 nChannel)
 			m_pSoundFontSynth->ResetChannelProgram(nChannel);
 	}
 
+	m_pSoundFontSynth->SetChannelTranspose(nChannel, Channel.nTranspose, Channel.nUpperTranspose);
+
 	// The instrument from the split note upwards
 	const bool bSplit = Channel.nSplitNote != CPresets::NoSplit && Channel.nUpperProgram != CPresets::Unknown;
 	if (!m_pSoundFontSynth->SetChannelSplit(nChannel, bSplit ? Channel.nSplitNote : CSoundFontSynth::NoSplit, Channel.nUpperBank, Channel.nUpperProgram))
@@ -2140,6 +2270,8 @@ void CMT32Pi::FormatSettingName(u8 nSetting, char* pBuffer, size_t nSize) const
 		case SettingChEnabled:		pName = "Sound"; break;
 		case SettingChInstrument:	pName = "Instrument"; break;
 		case SettingChSplit:		pName = "Split"; break;
+		case SettingChOctave:		pName = "Octave"; break;
+		case SettingChSemitones:	pName = "Semitones"; break;
 		case SettingExit:		pName = "Exit"; break;
 
 		// Submenus, marked with an arrow
@@ -2162,14 +2294,14 @@ void CMT32Pi::FormatSettingName(u8 nSetting, char* pBuffer, size_t nSize) const
 
 	if (pName)
 		snprintf(pBuffer, nSize, "%s", pName);
-	else if (nSetting == SettingChUpper)
+	else if (nSetting == SettingChUpper || nSetting == SettingChUpperOctave || nSetting == SettingChUpperSemitones)
 	{
-		// The note it starts from
+		// With the note it starts from
 		char Note[8] = "-";
 		const CPresets::TPreset* pPreset = GetCurrentPreset();
 		if (pPreset)
 			FormatNote(pPreset->Channels[m_nEditChannel].nSplitNote, Note, sizeof(Note));
-		snprintf(pBuffer, nSize, "Instrument from %s", Note);
+		snprintf(pBuffer, nSize, "%s from %s", nSetting == SettingChUpper ? "Instrument" : nSetting == SettingChUpperOctave ? "Octave" : "Semitones", Note);
 	}
 	else if (nSetting >= SettingChannelFirst && nSetting < SettingChannelFirst + CPresets::MIDIChannels)
 		snprintf(pBuffer, nSize, "Channel %d " UI_SYMBOL_ARROW_RIGHT, nSetting - SettingChannelFirst + 1);
@@ -2220,6 +2352,18 @@ void CMT32Pi::FormatNote(int nNote, char* pBuffer, size_t nSize)
 		snprintf(pBuffer, nSize, "%s%d", Names[nNote % 12], nNote / 12 - 1);
 }
 
+void CMT32Pi::FormatTranspose(int nSemitones, char* pBuffer, size_t nSize)
+{
+	const int nOctaves = nSemitones / 12;
+	const int nRest = nSemitones % 12;
+	if (!nOctaves)
+		snprintf(pBuffer, nSize, "%+d", nRest);
+	else if (!nRest)
+		snprintf(pBuffer, nSize, "%+d oct", nOctaves);
+	else
+		snprintf(pBuffer, nSize, "%+d oct %+d", nOctaves, nRest);
+}
+
 void CMT32Pi::FormatChannelInstrument(u8 nChannel, bool bUpper, char* pBuffer, size_t nSize)
 {
 	// The name of what the channel plays (below or from its split note), without the number
@@ -2246,7 +2390,8 @@ void CMT32Pi::FormatChannelInstrument(u8 nChannel, bool bUpper, char* pBuffer, s
 
 bool CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction)
 {
-	float nFraction = 0.0f;
+	// Negative for values without a range
+	float nFraction = -1.0f;
 
 	if (IsListSetting(nSetting))
 		FormatSettingListItem(nSetting, GetSettingListIndex(nSetting), pBuffer, nSize);
@@ -2299,19 +2444,53 @@ bool CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float
 			snprintf(pBuffer, nSize, "Off");
 		else
 		{
+			// Each part with its transpose: "Slap Bass 1 -1 oct | C4 | Piano"
+			auto Append = [pBuffer, nSize](const char* pText)
+			{
+				const size_t nLength = strlen(pBuffer);
+				snprintf(pBuffer + nLength, nSize - nLength, "%s", pText);
+			};
+			char Text[CUserInterface::TMenu::TextLength];
+
 			FormatChannelInstrument(nChannel, false, pBuffer, nSize);
+			if (pChannel && pChannel->nTranspose)
+			{
+				FormatTranspose(pChannel->nTranspose, Text, sizeof(Text));
+				Append(" ");
+				Append(Text);
+			}
+
 			if (pChannel && pChannel->nSplitNote != CPresets::NoSplit)
 			{
-				char Note[8], Upper[CUserInterface::TMenu::TextLength];
-				FormatNote(pChannel->nSplitNote, Note, sizeof(Note));
-				FormatChannelInstrument(nChannel, true, Upper, sizeof(Upper));
-				const size_t nLength = strlen(pBuffer);
-				snprintf(pBuffer + nLength, nSize - nLength, " | %s | ", Note);
-				const size_t nLength2 = strlen(pBuffer);
-				snprintf(pBuffer + nLength2, nSize - nLength2, "%s", Upper);
+				FormatNote(pChannel->nSplitNote, Text, sizeof(Text));
+				Append(" | ");
+				Append(Text);
+				Append(" | ");
+				FormatChannelInstrument(nChannel, true, Text, sizeof(Text));
+				Append(Text);
+				if (pChannel->nUpperTranspose)
+				{
+					FormatTranspose(pChannel->nUpperTranspose, Text, sizeof(Text));
+					Append(" ");
+					Append(Text);
+				}
 			}
 		}
 		nFraction = pChannel && !pChannel->bEnabled ? 0.0f : 1.0f;
+	}
+	else if (nSetting == SettingChOctave || nSetting == SettingChSemitones || nSetting == SettingChUpperOctave
+		 || nSetting == SettingChUpperSemitones)
+	{
+		// The octaves, or the semitones beyond them (-14 is -1 octave and -2 semitones)
+		const CPresets::TPreset* pPreset = GetCurrentPreset();
+		const CPresets::TChannel* pChannel = pPreset ? &pPreset->Channels[m_nEditChannel] : nullptr;
+		const bool bUpper = nSetting == SettingChUpperOctave || nSetting == SettingChUpperSemitones;
+		const int nTranspose = pChannel ? (bUpper ? pChannel->nUpperTranspose : pChannel->nTranspose) : 0;
+		const int nValue = nSetting == SettingChOctave || nSetting == SettingChUpperOctave ? nTranspose / 12 : nTranspose % 12;
+		if (nValue)
+			snprintf(pBuffer, nSize, "%+d", nValue);
+		else
+			snprintf(pBuffer, nSize, "0");
 	}
 	else if (nSetting == SettingChEnabled || nSetting == SettingChSplit)
 	{
@@ -2366,6 +2545,8 @@ void CMT32Pi::OpenMenu(TMenu Menu)
 
 	if (Menu == TMenu::Instruments)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(0);
+	else if (Menu == TMenu::Choice)
+		m_nMenuIndex = m_nMenuCurrentIndex = GetSettingListIndex(m_nSetting);
 	else if (Menu == TMenu::Settings)
 	{
 		// The item that was open last is highlighted; no item is "in use"
@@ -2385,9 +2566,9 @@ void CMT32Pi::CloseMenu(bool bKeepSettingsPosition)
 		m_SettingsPage = TSettingsPage::Root;
 		m_nSetting = SettingPresetMenu;
 	}
-	else if (IsSettingsMenu())
+	else if (m_Menu == TMenu::Settings)
 	{
-		// The highlighted item
+		// The highlighted item (from a value or choice, it is the one open)
 		u8 Items[MaxSettingsPageItems];
 		if (m_nMenuIndex < GetSettingsItems(Items))
 			m_nSetting = Items[m_nMenuIndex];
@@ -2406,6 +2587,19 @@ void CMT32Pi::UpdateMenu()
 	CUserInterface::TMenu Menu = {};
 	Menu.nCurrentRow = -1;
 
+	// A value: its name, the value, and the position in the list of settings (without "Back")
+	if (m_Menu == TMenu::Value)
+	{
+		u8 Items[MaxSettingsPageItems];
+		Menu.Type = CUserInterface::TMenu::TType::Value;
+		Menu.nItem = FindSettingsItem(m_nSetting) + 1;
+		Menu.nItems = GetSettingsItems(Items) - 1;
+		FormatSettingName(m_nSetting, Menu.Title, sizeof(Menu.Title));
+		FormatSettingValue(m_nSetting, Menu.Value, sizeof(Menu.Value), &Menu.nFraction);
+		m_UserInterface.ShowMenu(Menu);
+		return;
+	}
+
 	// The selection in the middle row
 	const size_t nCount = GetMenuListCount();
 	constexpr int nSelectedRow = CUserInterface::TMenu::SelectedRow;
@@ -2418,6 +2612,14 @@ void CMT32Pi::UpdateMenu()
 		// The SoundFont the instruments are from
 		const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(m_pSoundFontSynth->GetSoundFontIndex());
 		snprintf(Menu.Title, sizeof(Menu.Title), "%s", pName ? pName : "Instrument");
+	}
+	else if (m_Menu == TMenu::Choice)
+	{
+		// The setting, with the channel it belongs to
+		if (m_SettingsPage == TSettingsPage::Channel)
+			snprintf(Menu.Title, sizeof(Menu.Title), "Ch. %d: ", m_nEditChannel + 1);
+		const size_t nLength = strlen(Menu.Title);
+		FormatSettingName(m_nSetting, Menu.Title + nLength, sizeof(Menu.Title) - nLength);
 	}
 	else
 	{
@@ -2435,12 +2637,17 @@ void CMT32Pi::UpdateMenu()
 		char* pValue = Menu.Values[nRow];
 		constexpr size_t nSize = CUserInterface::TMenu::TextLength;
 
-		if (m_Menu == TMenu::Instruments)
+		if (m_Menu == TMenu::Instruments || m_Menu == TMenu::Choice)
 		{
-			// The number above the name
-			m_pSoundFontSynth->FormatPresetName(nIndex, pName, nSize);
+			// Instruments with the number above the name; other choices (e.g. SoundFonts) in one line
+			if (m_Menu == TMenu::Instruments)
+				m_pSoundFontSynth->FormatPresetName(nIndex, pName, nSize);
+			else
+				FormatSettingListItem(m_nSetting, nIndex, pName, nSize);
+
 			char* pSpace = strchr(pName, ' ');
-			if (pSpace)
+			const bool bNumbered = pName[0] >= '0' && pName[0] <= '9' && m_nSetting != SettingSoundFont;
+			if (pSpace && (m_Menu == TMenu::Instruments || bNumbered))
 			{
 				snprintf(pValue, nSize, "%s", pSpace + 1);
 				*pSpace = '\0';
@@ -2480,6 +2687,9 @@ size_t CMT32Pi::GetMenuListCount() const
 			u8 Items[MaxSettingsPageItems];
 			return GetSettingsItems(Items);
 		}
+
+		case TMenu::Choice:
+			return GetSettingListCount(m_nSetting);
 
 		default:
 			return 0;

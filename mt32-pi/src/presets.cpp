@@ -188,11 +188,12 @@ void CPresets::Clear(TChannel& Channel)
 	Channel.nBank = Channel.nProgram = Unknown;
 	Channel.nSplitNote = NoSplit;
 	Channel.nUpperBank = Channel.nUpperProgram = Unknown;
+	Channel.nTranspose = Channel.nUpperTranspose = 0;
 }
 
 bool CPresets::IsDefault(const TChannel& Channel)
 {
-	return Channel.bEnabled && Channel.nProgram == Unknown && Channel.nSplitNote == NoSplit;
+	return Channel.bEnabled && Channel.nProgram == Unknown && Channel.nSplitNote == NoSplit && !Channel.nTranspose;
 }
 
 void CPresets::MakePath(const TEntry& Entry, char* pBuffer, size_t nSize) const
@@ -245,7 +246,8 @@ bool CPresets::SaveFile(TEntry& Entry)
 		    "# tp_transpose in semitones, tp_sensitivity_1 (high E) to _6 from 1 to 16.\n"
 		    "# channel_N (1-16): on/off; channel_N_instrument: bank:program (otherwise the\n"
 		    "# preset's for channels 1-6, the SoundFont's default for the others);\n"
-		    "# channel_N_split: MIDI note (60 = C4) from which channel_N_upper plays.\n"
+		    "# channel_N_split: MIDI note (60 = C4) from which channel_N_upper plays;\n"
+		    "# channel_N_transpose, channel_N_upper_transpose: semitones.\n"
 		    "[%s]\nname = %s\nsoundfont = %s\nbank = %d\nprogram = %d\n",
 		    PresetSection, Preset.Name, Preset.SoundFontPath, Preset.nBank, Preset.nProgram);
 	Text.Append(Line);
@@ -306,11 +308,21 @@ bool CPresets::SaveFile(TEntry& Entry)
 			Line.Format("channel_%u_instrument = %d:%d\n", nChannel + 1, Channel.nBank, Channel.nProgram);
 			Text.Append(Line);
 		}
+		if (Channel.nTranspose)
+		{
+			Line.Format("channel_%u_transpose = %d\n", nChannel + 1, Channel.nTranspose);
+			Text.Append(Line);
+		}
 		if (Channel.nSplitNote != NoSplit)
 		{
 			Line.Format("channel_%u_split = %d\nchannel_%u_upper = %d:%d\n", nChannel + 1, Channel.nSplitNote,
 				    nChannel + 1, Channel.nUpperBank, Channel.nUpperProgram);
 			Text.Append(Line);
+			if (Channel.nUpperTranspose)
+			{
+				Line.Format("channel_%u_upper_transpose = %d\n", nChannel + 1, Channel.nUpperTranspose);
+				Text.Append(Line);
+			}
 		}
 	}
 
@@ -404,6 +416,14 @@ int CPresets::INIHandler(void* pUser, const char* pSection, const char* pName, c
 			return ParseInstrument(Channel.nBank, Channel.nProgram);
 		if (!strcmp(pEnd, "_upper"))
 			return ParseInstrument(Channel.nUpperBank, Channel.nUpperProgram);
+		if (!strcmp(pEnd, "_transpose") || !strcmp(pEnd, "_upper_transpose"))
+		{
+			int nTranspose;
+			if (!CConfig::ParseOption(pValue, &nTranspose) || nTranspose < -MaxChannelTranspose || nTranspose > MaxChannelTranspose)
+				return 0;
+			(pEnd[1] == 't' ? Channel.nTranspose : Channel.nUpperTranspose) = nTranspose;
+			return 1;
+		}
 		if (!strcmp(pEnd, "_split"))
 		{
 			int nNote;

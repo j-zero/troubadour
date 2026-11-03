@@ -130,6 +130,9 @@ public:
 	void SetChannelMuted(u8 nChannel, bool bMuted);
 	// Returns false if the upper instrument didn't fit into memory; the channel isn't split then
 	bool SetChannelSplit(u8 nChannel, int nSplitNote, int nUpperBank = 0, int nUpperProgram = 0);
+	// Semitones by which the notes below the split note (or all) and from it upwards are transposed; notes that would
+	// be out of range aren't played
+	void SetChannelTranspose(u8 nChannel, int nLower, int nUpper);
 
 	// Instruments of the current SoundFont whose samples are kept in memory, so that selecting them doesn't load
 	// anything (e.g. those of the presets); replaces the ones kept before. Instruments are kept in the order given
@@ -209,7 +212,9 @@ private:
 	u16 m_nMutedMask;
 	s16 m_SplitNotes[MIDIChannels];
 	TPreset m_UpperPresets[MIDIChannels];
+	s8 m_Transposes[MIDIChannels][2];	// Lower, upper
 	u8 m_NoteLayers[MIDIChannels][128];
+	u8 m_NotesPlayed[MIDIChannels][128];	// The note each one was played as (transposed)
 
 	// Must be called with the synth lock held
 	void ResetLayers();

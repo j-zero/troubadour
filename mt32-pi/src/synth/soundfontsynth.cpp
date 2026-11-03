@@ -271,7 +271,9 @@ CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
 	  m_nMutedMask(0),
 	  m_SplitNotes{},
 	  m_UpperPresets{},
+	  m_Transposes{},
 	  m_NoteLayers{},
+	  m_NotesPlayed{},
 
 	  m_PinnedInstruments{},
 	  m_nPinnedInstruments(0),
@@ -400,38 +402,45 @@ void CSoundFontSynth::HandleMIDIShortMessage(u32 nMessage)
 	// Handle channel messages
 	switch (nType)
 	{
-		// Note off (also a note on with velocity 0), where the note was started
+		// Note off (also a note on with velocity 0), where and as what the note was started
 		case 0x80:
 		case 0x90:
 		{
-			u8& nLayer = m_NoteLayers[nChannel][nData1 & 0x7F];
+			const u8 nNote = nData1 & 0x7F;
+			u8& nLayer = m_NoteLayers[nChannel][nNote];
 			if (nType == 0x80 || !nData2)
 			{
-				fluid_synth_noteoff(m_pSynth, nLayer == LayerUpper ? nUpper : nChannel, nData1);
+				fluid_synth_noteoff(m_pSynth, nLayer == LayerUpper ? nUpper : nChannel, nLayer != LayerNone ? m_NotesPlayed[nChannel][nNote] : nNote);
 				nLayer = LayerNone;
 				break;
 			}
 
-			// From the split note upwards, the upper instrument
+			// From the split note upwards, the upper instrument; each part with its transpose
 			const int nSplit = m_SplitNotes[nChannel];
-			if (nSplit != NoSplit && nData1 >= nSplit)
+			const bool bUpper = nSplit != NoSplit && nNote >= nSplit;
+			const int nPlayed = nNote + m_Transposes[nChannel][bUpper];
+			if (nPlayed < 0 || nPlayed > 127)
 			{
-				nLayer = LayerUpper;
-				fluid_synth_noteon(m_pSynth, nUpper, nData1, nData2);
+				nLayer = LayerNone;
 				break;
 			}
 
-			nLayer = LayerLower;
-			if (m_nDefaultProgramMask & (1 << nChannel))
+			nLayer = bUpper ? LayerUpper : LayerLower;
+			m_NotesPlayed[nChannel][nNote] = nPlayed;
+			if (!bUpper && (m_nDefaultProgramMask & (1 << nChannel)))
 				LoadDefaultProgram(nChannel);
-			fluid_synth_noteon(m_pSynth, nChannel, nData1, nData2);
+			fluid_synth_noteon(m_pSynth, bUpper ? nUpper : nChannel, nPlayed, nData2);
 			break;
 		}
 
-		// Polyphonic key pressure/aftertouch
+		// Polyphonic key pressure/aftertouch, for the note as it was played
 		case 0xA0:
-			fluid_synth_key_pressure(m_pSynth, m_NoteLayers[nChannel][nData1 & 0x7F] == LayerUpper ? nUpper : nChannel, nData1, nData2);
+		{
+			const u8 nLayer = m_NoteLayers[nChannel][nData1 & 0x7F];
+			if (nLayer != LayerNone)
+				fluid_synth_key_pressure(m_pSynth, nLayer == LayerUpper ? nUpper : nChannel, m_NotesPlayed[nChannel][nData1 & 0x7F], nData2);
 			break;
+		}
 
 		// Control change; the upper channel follows, so that it is in the same state when the channel is split
 		case 0xB0:
@@ -816,11 +825,25 @@ bool CSoundFontSynth::SetChannelSplit(u8 nChannel, int nSplitNote, int nUpperBan
 	return bResult;
 }
 
+void CSoundFontSynth::SetChannelTranspose(u8 nChannel, int nLower, int nUpper)
+{
+	if (nChannel >= MIDIChannels)
+		return;
+
+	// Notes that are sounding end as they were played
+	CTaskLockHolder TaskLock(m_TaskLock);
+	m_Lock.Acquire();
+	m_Transposes[nChannel][0] = Utility::Clamp(nLower, -127, 127);
+	m_Transposes[nChannel][1] = Utility::Clamp(nUpper, -127, 127);
+	m_Lock.Release();
+}
+
 void CSoundFontSynth::ResetLayers()
 {
 	m_nMutedMask = 0;
 	for (s16& nSplit : m_SplitNotes)
 		nSplit = NoSplit;
+	memset(m_Transposes, 0, sizeof(m_Transposes));
 	memset(m_NoteLayers, LayerNone, sizeof(m_NoteLayers));
 }
 

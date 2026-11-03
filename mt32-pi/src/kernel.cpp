@@ -24,7 +24,7 @@
 #include "kernel.h"
 
 #ifndef MT32_PI_VERSION
-#define MT32_PI_VERSION "<unknown>"
+#define MT32_PI_VERSION ""
 #endif
 
 CKernel::CKernel(void)
@@ -116,7 +116,7 @@ bool CKernel::Initialize(void)
 
 CStdlibApp::TShutdownMode CKernel::Run(void)
 {
-	m_Logger.Write(GetKernelName(), LogNotice, "mt32-pi " MT32_PI_VERSION);
+	m_Logger.Write(GetKernelName(), LogNotice, "Troubadour " MT32_PI_VERSION);
 	m_Logger.Write(GetKernelName(), LogNotice, "Compile time: " __DATE__ " " __TIME__);
 
 	m_MT32Pi.Run(0);

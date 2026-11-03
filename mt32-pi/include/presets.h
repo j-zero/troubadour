@@ -53,7 +53,11 @@ public:
 		int nSplitNote;		// From this note upwards, the upper instrument; NoSplit for none
 		int nUpperBank;
 		int nUpperProgram;
+		int nTranspose;		// Semitones, below the split note (or all notes) and from it upwards
+		int nUpperTranspose;
 	};
+
+	static constexpr int MaxChannelTranspose = 48;
 
 	struct TPreset
 	{

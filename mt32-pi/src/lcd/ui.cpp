@@ -122,14 +122,6 @@ void CUserInterface::Update(CGC9A01& Display, CSoundFontSynth& Synth, unsigned i
 		m_State = TState::None;
 	else if ((State == TState::DisplayingSysExText || State == TState::DisplayingSysExBitmap) && nDeltaTicks >= Utility::MillisToTicks(SC55DisplayTimeMillis))
 		m_State = TState::None;
-	else if (State == TState::EnteringPowerSavingMode && nDeltaTicks >= Utility::MillisToTicks(SystemMessageDisplayTimeMillis))
-	{
-		Display.SetBacklightState(false);
-		m_State = TState::InPowerSavingMode;
-	}
-
-	if (m_State == TState::InPowerSavingMode)
-		return;
 
 	// Display standby: after a while without activity on the home screen; it stays off until there is activity (the
 	// clock wraps around after about 71 minutes) or something else is shown
@@ -164,7 +156,6 @@ void CUserInterface::Update(CGC9A01& Display, CSoundFontSynth& Synth, unsigned i
 	{
 		case TState::DisplayingMessage:
 		case TState::DisplayingSpinnerMessage:
-		case TState::EnteringPowerSavingMode:
 		{
 			m_Lock.Acquire();
 			memcpy(Text, m_SystemMessageTextBuffer, sizeof(Text));
@@ -241,7 +232,8 @@ void CUserInterface::ShowStartup(CGC9A01& Display, const char* pVersion, const c
 {
 	m_pCanvas->Clear(ColorBackground);
 	DrawLogo(LogoY);
-	m_pCanvas->DrawCenteredText(FontSmall, pVersion, 130, ColorTextDim, 116);
+	if (pVersion && *pVersion)
+		m_pCanvas->DrawCenteredText(FontSmall, pVersion, 130, ColorTextDim, 116);
 
 	if (pStatus && *pStatus)
 		DrawWrappedText(FontMedium, pStatus, 172, ColorAccentText, 2, 116);
@@ -261,7 +253,7 @@ void CUserInterface::ShowStartupProgress(CGC9A01& Display, const char* pVersion,
 	DrawLogo(LogoY);
 	if (Text[0])
 		m_pCanvas->DrawCenteredText(FontSmall, Text, 130, ColorAccentText, 116);
-	else
+	else if (pVersion && *pVersion)
 		m_pCanvas->DrawCenteredText(FontSmall, pVersion, 130, ColorTextDim, 116);
 	DrawLoadProgress(nLoadedBytes, nTotalBytes, 112, 118, 152);
 
@@ -274,7 +266,6 @@ void CUserInterface::DrawLogo(int nY)
 	const int nX = CCanvas::Center - LogoText.nWidth / 2;
 	m_pCanvas->DrawImage(LogoInitial, nX, nY, ColorLogoInitial);
 	m_pCanvas->DrawImage(LogoText, nX, nY, ColorLogoText);
-	m_pCanvas->DrawImage(LogoSubtitle, nX, nY, ColorTextDim);
 }
 
 void CUserInterface::ShowPanic(CGC9A01& Display, const char* pMessage)
@@ -381,21 +372,6 @@ void CUserInterface::ShowSysExBitmap(TSysExDisplayMessage Type, const u8* pData,
 	m_State = TState::DisplayingSysExBitmap;
 }
 
-void CUserInterface::EnterPowerSavingMode()
-{
-	m_Lock.Acquire();
-	snprintf(m_SystemMessageTextBuffer, sizeof(m_SystemMessageTextBuffer), "Power saving mode");
-	m_SystemMessageType = TMessageType::Notice;
-	m_Lock.Release();
-
-	m_nStateTime = CTimer::GetClockTicks();
-	m_State = TState::EnteringPowerSavingMode;
-}
-
-void CUserInterface::ExitPowerSavingMode()
-{
-	m_State = TState::None;
-}
 
 void CUserInterface::ShowMenu(const TMenu& Menu)
 {
@@ -659,6 +635,28 @@ void CUserInterface::DrawMenu(const TMenu& Menu, unsigned int nTicks)
 	// font, it is shortened (or scrolls, if selected)
 	static const TUIFont* const SelectedFonts[] = { &FontMedium, &FontSmall, &FontTiny };
 	static const TUIFont* const RowFonts[] = { &FontSmall, &FontTiny };
+
+	if (Menu.Type == TMenu::TType::Value)
+	{
+		static const TUIFont* const ValueFonts[] = { &FontLarge, &FontMedium, &FontSmall };
+
+		if (Menu.nFraction >= 0.0f)
+			DrawGauge(104, 116, Menu.nFraction, ColorAccent);
+
+		// Its position in the list, then the name and the value, which keep their centres when they get smaller
+		char Position[16];
+		snprintf(Position, sizeof(Position), "%u / %u", static_cast<unsigned>(Menu.nItem), static_cast<unsigned>(Menu.nItems));
+		m_pCanvas->DrawCenteredText(FontSmall, Position, 52, ColorTextFaint, 98);
+
+		const int nTitleY = 84 + FontMedium.nHeight / 2;
+		const TUIFont& TitleFont = FitFont(*m_pCanvas, Menu.Title, CCanvas::GetVisibleWidth(nTitleY - 12, nTitleY + 12, 98), SelectedFonts);
+		DrawScrollingText(TitleFont, Menu.Title, nTitleY - TitleFont.nHeight / 2, ColorText, 98, nTicks);
+
+		const int nValueY = 112 + FontLarge.nHeight / 2;
+		const TUIFont& ValueFont = FitFont(*m_pCanvas, Menu.Value, CCanvas::GetVisibleWidth(nValueY - 16, nValueY + 16, 98), ValueFonts);
+		DrawScrollingText(ValueFont, Menu.Value, nValueY - ValueFont.nHeight / 2, ColorAccentText, 98, nTicks);
+		return;
+	}
 
 	// Rows of two lines, the selection in the middle
 	constexpr int nRowHeight = 58;

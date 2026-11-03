@@ -45,6 +45,11 @@ public:
 	int nDrumProgram;
 	int nVolume;		// -1 if not set
 	int nDisplayChannels;	// Channels shown on the home screen; -1 if not set
+	int nDisplayStandby;	// Seconds without activity before the display turns off, 0 for never; -1 if not set
+	int nTriplePlay;	// TriplePlay support and its software mode: 0 off, 1 on, -1 if not set
+	int nTriplePlaySoftwareMode;
+	int nTriplePlayProgramPresets;	// The TriplePlay's program changes switch presets: 0 off, 1 on, -1 if not set
+	int nPreset;		// Current preset; -1 if none
 	TFXProfile Effects;	// Reverb and chorus settings that were changed
 
 private:

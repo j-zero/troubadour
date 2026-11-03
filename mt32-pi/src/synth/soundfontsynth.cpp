@@ -268,6 +268,9 @@ CSoundFontSynth::CSoundFontSynth(unsigned nSampleRate)
 	  m_DefaultPrograms{0},
 	  m_nDefaultProgramMask(0),
 
+	  m_PinnedInstruments{},
+	  m_nPinnedInstruments(0),
+
 	  m_DisplayInfoLock(TASK_LEVEL),
 	  m_DisplayInfo{}
 {
@@ -625,6 +628,16 @@ bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nCha
 		return true;
 	}
 
+	// Shown while its samples are loading
+	if (m_pUI)
+	{
+		char Name[CUserInterface::LoadingTextLength];
+		fluid_sfont_t* pSoundFont = fluid_synth_get_sfont_by_id(m_pSynth, m_nSoundFontID);
+		fluid_preset_t* pPreset = pSoundFont ? fluid_sfont_get_preset(pSoundFont, Preset.nBank, Preset.nProgram) : nullptr;
+		FormatProgramName(Name, sizeof(Name), Preset.nBank, Preset.nProgram, pPreset ? fluid_preset_get_name(pPreset) : "?");
+		m_pUI->SetLoadingText(Name);
+	}
+
 	// Release the samples of the current instrument first; otherwise, both instruments would have to fit into
 	// memory at the same time, as the channels still holding the old one keep its samples loaded
 	for (u8 nChannel = nFirstChannel; nChannel < nLastChannel; ++nChannel)
@@ -652,10 +665,84 @@ bool CSoundFontSynth::SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nCha
 	UpdateProgramName();
 	m_Lock.Release();
 
+	if (m_pUI)
+		m_pUI->SetLoadingText("");
+
 	if (pSamplesLoaded)
 		*pSamplesLoaded = LoadReporter.SamplesLoaded();
 
 	return !bOutOfMemory;
+}
+
+size_t CSoundFontSynth::SetPinnedInstruments(const int* pBanks, const int* pPrograms, size_t nCount)
+{
+	CTaskLockHolder TaskLock(m_TaskLock);
+	CSampleLoadReporter LoadReporter(m_pUI);
+
+	// The new ones that are also kept already don't load anything
+	TPreset New[MaxPinnedInstruments];
+	size_t nNew = 0;
+	for (size_t i = 0; i < nCount && nNew < MaxPinnedInstruments; ++i)
+	{
+		if (pBanks[i] < 0 || pBanks[i] > 0xFFFF || pPrograms[i] < 0 || pPrograms[i] > 127)
+			continue;
+
+		bool bDuplicate = false;
+		for (size_t j = 0; j < nNew && !bDuplicate; ++j)
+			bDuplicate = New[j].nBank == pBanks[i] && New[j].nProgram == pPrograms[i];
+		if (!bDuplicate)
+			New[nNew++] = { static_cast<u16>(pBanks[i]), static_cast<u8>(pPrograms[i]) };
+	}
+
+	m_Lock.Acquire();
+
+	// Those that are no longer wanted first, so that their memory is free for the others; those in both lists stay
+	for (size_t i = 0; i < m_nPinnedInstruments; ++i)
+	{
+		const TPreset& Old = m_PinnedInstruments[i];
+		bool bKept = false;
+		for (size_t j = 0; j < nNew && !bKept; ++j)
+			bKept = New[j].nBank == Old.nBank && New[j].nProgram == Old.nProgram;
+		if (!bKept)
+			fluid_synth_unpin_preset(m_pSynth, m_nSoundFontID, Old.nBank, Old.nProgram);
+	}
+
+	size_t nPinned = 0;
+	for (size_t i = 0; i < nNew; ++i)
+	{
+		bool bWasPinned = false;
+		for (size_t j = 0; j < m_nPinnedInstruments && !bWasPinned; ++j)
+			bWasPinned = m_PinnedInstruments[j].nBank == New[i].nBank && m_PinnedInstruments[j].nProgram == New[i].nProgram;
+
+		// Still pinned (FluidSynth pins once, it doesn't count)
+		if (bWasPinned)
+		{
+			New[nPinned++] = New[i];
+			continue;
+		}
+
+		// An instrument that doesn't fit is released again, and no further ones are pinned
+		const unsigned nFailedAllocs = s_nFailedAllocs;
+		const int nResult = fluid_synth_pin_preset(m_pSynth, m_nSoundFontID, New[i].nBank, New[i].nProgram);
+		if (s_nFailedAllocs != nFailedAllocs)
+		{
+			if (nResult == FLUID_OK)
+				fluid_synth_unpin_preset(m_pSynth, m_nSoundFontID, New[i].nBank, New[i].nProgram);
+			LOGWARN("Not enough memory to keep instrument %d:%d loaded", New[i].nBank, New[i].nProgram);
+			break;
+		}
+
+		if (nResult == FLUID_OK)
+			New[nPinned++] = New[i];
+	}
+
+	memcpy(m_PinnedInstruments, New, nPinned * sizeof(*New));
+	m_nPinnedInstruments = nPinned;
+
+	m_Lock.Release();
+
+	LOGNOTE("%u instruments kept in memory", static_cast<unsigned>(nPinned));
+	return nPinned;
 }
 
 const CSoundFontSynth::TEffectInfo& CSoundFontSynth::GetEffectInfo(TEffect Effect)
@@ -891,6 +978,9 @@ bool CSoundFontSynth::Reinitialize(const char* pSoundFontPath, const TFXProfile*
 	// of all 16 channels from the SD card (several hundred megabytes for a large piano). Each channel gets its
 	// default program on its first note instead, unless a program is selected before.
 	const int nSoundFontID = fluid_synth_sfload(m_pSynth, pSoundFontPath, false);
+
+	// The synth is new, so nothing is pinned
+	m_nPinnedInstruments = 0;
 
 	if (nSoundFontID != FLUID_FAILED)
 	{

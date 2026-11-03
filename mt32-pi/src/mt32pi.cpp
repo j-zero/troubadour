@@ -34,18 +34,24 @@
 #include "mt32pi.h"
 
 #define MT32_PI_NAME "Troubadour"
+
+// Set from the git tag when building
+#ifndef MT32_PI_VERSION
+#define MT32_PI_VERSION "<unknown>"
+#endif
 LOGMODULE(MT32_PI_NAME);
 
 const char WLANFirmwarePath[] = "SD:firmware/";
 const char WLANConfigFile[]   = "SD:wpa_supplicant.conf";
 const char LastStateFile[]    = "SD:last_state.cfg";
+const char PresetsDirectory[] = "SD:presets";
 
 constexpr u32 LCDUpdatePeriodMillis                = 16;
 constexpr u32 MisterUpdatePeriodMillis             = 50;
 constexpr u32 LEDTimeoutMillis                     = 50;
 constexpr u32 ActiveSenseTimeoutMillis             = 330;
 
-constexpr float Sample24BitMax = (1 << 24 - 1) - 1;
+constexpr float Sample24BitMax = (1 << (24 - 1)) - 1;
 
 enum class TCustomSysExCommand : u8
 {
@@ -96,12 +102,12 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 	  m_nDeferredSoundFontSwitchIndex(0),
 	  m_nDeferredSoundFontSwitchTime(0),
 
-	  m_nFootswitchesDown(0),
-	  m_bFootswitchesBoth(false),
-	  m_bFootswitchRepeated(false),
+	  m_bEncoder2ButtonHeld(false),
+	  m_bEncoder2LongPress(false),
 
 	  m_Menu(TMenu::None),
-	  m_nSetting(SettingVolume),
+	  m_SettingsPage(TSettingsPage::Root),
+	  m_nSetting(SettingPresetMenu),
 	  m_nMenuIndex(0),
 	  m_nMenuCurrentIndex(0),
 	  m_nMenuTime(0),
@@ -127,6 +133,18 @@ CMT32Pi::CMT32Pi(CI2CMaster* pI2CMaster, CSPIMaster* pSPIMaster, CInterruptSyste
 
 	  m_pSound(nullptr),
 	  m_pPisound(nullptr),
+	  m_pTriplePlay(nullptr),
+	  m_bTriplePlayEnabled(false),
+	  m_bTriplePlaySoftwareMode(false),
+	  m_bTriplePlayProgramPresets(false),
+	  m_nTriplePlayProgram(-1),
+
+	  m_Presets(PresetsDirectory),
+	  m_pPresetSaver(nullptr),
+	  m_nCurrentPreset(-1),
+	  m_bApplyingPreset(false),
+	  m_bPresetChanged(false),
+	  m_nPresetChangeTime(0),
 
 	  m_nMasterVolume(100),
 	  m_pSoundFontSynth(nullptr),
@@ -278,6 +296,10 @@ bool CMT32Pi::Initialize(bool bSerialMIDIAvailable)
 		m_pControl = nullptr;
 	}
 
+	m_pTriplePlay = new CTriplePlay();
+	m_Presets.Load();
+	m_pPresetSaver = new CPresetSaver(m_Presets);
+
 	if (m_LastState.Load(LastStateFile))
 		LOGNOTE("Restoring settings from '%s'", LastStateFile);
 	m_pLastStateSaver = new CLastStateSaver(m_LastState, LastStateFile);
@@ -391,11 +413,42 @@ void CMT32Pi::RestoreLastState()
 	if (m_LastState.nDisplayChannels > 0)
 		m_UserInterface.SetDisplayChannels(m_LastState.nDisplayChannels);
 
-	if (m_LastState.nProgram >= 0 || m_LastState.nDrumProgram >= 0)
+	// Set in the settings, otherwise from the config file
+	const int nStandbyTimeout = m_LastState.nDisplayStandby >= 0 ? m_LastState.nDisplayStandby : m_pConfig->LCDStandbyTimeout;
+	m_UserInterface.SetStandbyTimeout(Utility::Clamp(nStandbyTimeout, 0, static_cast<int>(CUserInterface::MaxStandbyTimeout)));
+
+	// Switched in the settings, otherwise from the config file
+	m_bTriplePlaySoftwareMode = m_LastState.nTriplePlaySoftwareMode >= 0 ? m_LastState.nTriplePlaySoftwareMode : m_pConfig->TriplePlaySoftwareMode;
+	m_pTriplePlay->SetSoftwareMode(m_bTriplePlaySoftwareMode);
+	m_bTriplePlayEnabled = m_LastState.nTriplePlay >= 0 ? m_LastState.nTriplePlay : m_pConfig->TriplePlayEnabled;
+	m_bTriplePlayProgramPresets = m_LastState.nTriplePlayProgramPresets >= 0 ? m_LastState.nTriplePlayProgramPresets : m_pConfig->TriplePlayProgramChangePresets;
+	m_pTriplePlay->SetProgramsToHost(m_bTriplePlayProgramPresets);
+
+	// The preset that was selected last, or the first one (also sends its settings to the TriplePlay once it's there)
+	const size_t nPresets = m_Presets.GetCount();
+	const bool bPreset = nPresets > 0;
+	if (bPreset && (m_LastState.nPreset < 0 || static_cast<size_t>(m_LastState.nPreset) >= nPresets))
+		m_LastState.nPreset = 0;
+
+	if (m_LastState.nProgram >= 0 || m_LastState.nDrumProgram >= 0 || bPreset)
 	{
 		LCDLog(TLCDLogType::Startup, "Loading instrument");
-		ApplyLastInstrument();
+		if (bPreset)
+			ApplyPreset(m_LastState.nPreset);
+		else
+			ApplyLastInstrument();
 	}
+
+	// There is always a current preset: without any, the first one is made from the instrument that was restored
+	if (!bPreset)
+		CapturePreset();
+
+	UpdatePresetLabel();
+
+	// The other presets' instruments, so that switching to them is immediate
+	if (m_Presets.GetCount() > 1)
+		LCDLog(TLCDLogType::Startup, "Loading presets");
+	UpdatePinnedInstruments();
 }
 
 void CMT32Pi::MainTask()
@@ -471,11 +524,35 @@ void CMT32Pi::MainTask()
 		if (m_Menu != TMenu::None && (nTicks - m_nMenuTime) >= MSEC2HZ(MenuTimeoutMillis))
 			CloseMenu();
 
-		// Save settings once they have settled
+		// TriplePlay: commands, button actions and the settings shown. When it has been switched off, the commands
+		// that take it out of software mode are still sent.
+		CUSBMIDIDevice* const pTriplePlayDevice = m_bTriplePlayEnabled || m_pTriplePlay->IsSending() ? m_pUSBMIDIDevice : nullptr;
+		if (m_pTriplePlay->Update(pTriplePlayDevice))
+		{
+			m_UserInterface.NotifyActivity();
+			UpdateTriplePlayStatus();
+			if (m_Menu == TMenu::Settings || m_Menu == TMenu::Parameter)
+				UpdateMenu();
+
+			// Its bend mode and transpose belong to the current preset
+			CapturePreset();
+		}
+
+		// Its program changes, which switch presets
+		if (m_bTriplePlayEnabled && m_bTriplePlayProgramPresets)
+			UpdateTriplePlayPrograms();
+
+		// Save settings and the current preset once they have settled
 		if (m_bLastStateChanged && (nTicks - m_nLastStateChangeTime) >= MSEC2HZ(LastStateSaveDelayMillis))
 		{
 			m_bLastStateChanged = false;
 			m_pLastStateSaver->Trigger();
+		}
+
+		if (m_bPresetChanged && (nTicks - m_nPresetChangeTime) >= MSEC2HZ(LastStateSaveDelayMillis))
+		{
+			m_bPresetChanged = false;
+			m_pPresetSaver->Trigger();
 		}
 
 		// Check for USB PnP events
@@ -648,9 +725,12 @@ void CMT32Pi::OnShortMessage(u32 nMessage)
 		return;
 	}
 
-	// Flash LED for channel messages
+	// Flash LED and keep the display on for channel messages (not for clock and the like)
 	if ((nMessage & 0xFF) < 0xF0)
+	{
 		LEDOn();
+		m_UserInterface.NotifyActivity();
+	}
 
 	m_pSoundFontSynth->HandleMIDIShortMessage(nMessage);
 
@@ -955,7 +1035,10 @@ void CMT32Pi::ProcessEventQueue()
 
 	// We got some events, wake up
 	if (nEvents > 0)
+	{
 		Awaken();
+		m_UserInterface.NotifyActivity();
+	}
 
 	for (size_t i = 0; i < nEvents; ++i)
 	{
@@ -994,6 +1077,12 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 		return;
 	}
 
+	if (Event.Button == TButton::Encoder2Button)
+	{
+		ProcessEncoder2ButtonEvent(Event);
+		return;
+	}
+
 	if (!Event.bPressed)
 		return;
 
@@ -1005,47 +1094,17 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 			LCDLog(TLCDLogType::Notice, "Volume: %d", m_nMasterVolume);
 			break;
 
-		// Instrument list: select the highlighted instrument; settings list: open the highlighted setting; a
-		// setting: back to the settings list
+		// Instrument list: select the highlighted instrument; settings: leave them
 		case TButton::EncoderButton:
 			if (Event.bRepeat)
 				break;
 
 			if (m_Menu == TMenu::Instruments)
 				SelectMenuInstrument();
-			else if (m_Menu == TMenu::Settings)
-				OpenSetting(static_cast<u8>(m_nMenuIndex));
-			else if (m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts)
-				OpenMenu(TMenu::Settings);
+			else if (IsSettingsMenu())
+				CloseMenu();
 			else
 				OpenMenu(TMenu::Instruments);
-			break;
-
-		// Open or close the settings list; in a setting, back to the settings list, loading the highlighted
-		// drum kit/SoundFont if it isn't the current one
-		case TButton::Encoder2Button:
-			if (Event.bRepeat)
-				break;
-
-			if (m_Menu == TMenu::SoundFonts && m_nMenuIndex != m_nMenuCurrentIndex)
-			{
-				// The SoundFont's name is shown once it has loaded
-				CloseMenu();
-				m_bDeferredSoundFontSwitchFlag = false;
-				SwitchSoundFont(m_nMenuIndex);
-			}
-			else if (m_Menu == TMenu::DrumKits && m_nMenuIndex != m_nMenuCurrentIndex)
-			{
-				// Leave an error message visible
-				if (ApplyDrumKit(m_nMenuIndex))
-					OpenMenu(TMenu::Settings);
-				else
-					CloseMenu();
-			}
-			else if (m_Menu == TMenu::Settings)
-				CloseMenu();
-			else
-				OpenMenu(TMenu::Settings);
 			break;
 
 		default:
@@ -1053,50 +1112,103 @@ void CMT32Pi::ProcessButtonEvent(const TButtonEvent& Event)
 	}
 }
 
-void CMT32Pi::ProcessFootswitchEvent(const TButtonEvent& Event)
+void CMT32Pi::ProcessEncoder2ButtonEvent(const TButtonEvent& Event)
 {
-	// Footswitches act when released, so that pressing both doesn't also move the selection
-	const u8 nMask = Event.Button == TButton::Button1 ? 0b01 : 0b10;
-	const int nDelta = Event.Button == TButton::Button1 ? 1 : -1;
-
-	if (Event.bRepeat)
-	{
-		// Holding a footswitch scrolls through the list
-		if (!m_bFootswitchesBoth)
-		{
-			m_bFootswitchRepeated = true;
-			MoveInstrumentSelection(nDelta);
-		}
-		return;
-	}
-
+	// A long press leaves the settings; a short one acts when released
 	if (Event.bPressed)
 	{
-		m_nFootswitchesDown |= nMask;
-
-		// Both footswitches select the highlighted instrument
-		if (m_nFootswitchesDown == FootswitchMaskBoth && !m_bFootswitchesBoth)
+		if (!Event.bRepeat)
 		{
-			m_bFootswitchesBoth = true;
-			if (m_Menu == TMenu::Instruments)
-				SelectMenuInstrument();
-			else
-				OpenMenu(TMenu::Instruments);
+			m_bEncoder2ButtonHeld = true;
+			m_bEncoder2LongPress = false;
+		}
+		else if (m_bEncoder2ButtonHeld && !m_bEncoder2LongPress)
+		{
+			m_bEncoder2LongPress = true;
+			if (IsSettingsMenu())
+			{
+				// From a list, remember its highlighted item
+				if (m_Menu == TMenu::Settings)
+				{
+					u8 Items[MaxSettingsPageItems];
+					if (m_nMenuIndex < GetSettingsItems(Items))
+						m_nSetting = Items[m_nMenuIndex];
+				}
+				CloseMenu(true);
+			}
 		}
 		return;
 	}
 
-	m_nFootswitchesDown &= ~nMask;
-	if (!m_bFootswitchesBoth && !m_bFootswitchRepeated)
-		MoveInstrumentSelection(nDelta);
+	const bool bShortPress = m_bEncoder2ButtonHeld && !m_bEncoder2LongPress;
+	m_bEncoder2ButtonHeld = false;
+	if (!bShortPress)
+		return;
 
-	if (!m_nFootswitchesDown)
-		m_bFootswitchesBoth = m_bFootswitchRepeated = false;
+	// Settings list: open the highlighted item; a setting: back to the list, loading the highlighted drum
+	// kit/SoundFont if it isn't the current one
+	if (m_Menu == TMenu::Settings)
+	{
+		u8 Items[MaxSettingsPageItems];
+		if (m_nMenuIndex < GetSettingsItems(Items))
+			OpenSetting(Items[m_nMenuIndex]);
+	}
+	else if (m_Menu == TMenu::SoundFonts && m_nMenuIndex != m_nMenuCurrentIndex)
+	{
+		// The SoundFont's name is shown once it has loaded
+		CloseMenu();
+		m_bDeferredSoundFontSwitchFlag = false;
+		SwitchSoundFont(m_nMenuIndex);
+	}
+	else if (m_Menu == TMenu::DrumKits && m_nMenuIndex != m_nMenuCurrentIndex)
+	{
+		// Leave an error message visible
+		if (ApplyDrumKit(m_nMenuIndex))
+			OpenMenu(TMenu::Settings);
+		else
+			CloseMenu();
+	}
+	else if (m_Menu == TMenu::PresetInstruments && m_nMenuIndex != m_nMenuCurrentIndex)
+	{
+		// Saved to the current preset with the other changes; leave an error message visible
+		if (ApplyProgramChange(m_nMenuIndex))
+			OpenMenu(TMenu::Settings);
+		else
+			CloseMenu();
+	}
+	else if (m_Menu == TMenu::Presets)
+	{
+		// Loading a SoundFont shows its name, so the menu is closed then
+		const bool bOtherSoundFont = m_nMenuIndex < m_Presets.GetCount()
+					     && strcmp(m_Presets.Get(m_nMenuIndex).SoundFontPath,
+						       m_pSoundFontSynth->GetSoundFontManager().GetSoundFontPath(m_pSoundFontSynth->GetSoundFontIndex()));
+		if (bOtherSoundFont)
+			CloseMenu();
+		ApplyPreset(m_nMenuIndex);
+		if (!bOtherSoundFont)
+			OpenMenu(TMenu::Settings);
+	}
+	else
+		OpenMenu(TMenu::Settings);
+}
+
+void CMT32Pi::ProcessFootswitchEvent(const TButtonEvent& Event)
+{
+	const int nDelta = Event.Button == TButton::Button1 ? 1 : -1;
+
+	// Each footswitch switches to the next/previous preset when released, round the list
+	const size_t nCount = m_Presets.GetCount();
+	if (Event.bPressed || !nCount)
+		return;
+
+	const int nCurrent = m_nCurrentPreset >= 0 ? m_nCurrentPreset : (nDelta > 0 ? -1 : 0);
+	ApplyPreset((nCurrent + nDelta + static_cast<int>(nCount)) % static_cast<int>(nCount));
 }
 
 void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
 {
-	const bool bInSetting = m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts;
+	const bool bInSetting = m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts
+				|| m_Menu == TMenu::Presets || m_Menu == TMenu::PresetInstruments;
 
 	if (Event.nEncoder == 0)
 	{
@@ -1111,13 +1223,21 @@ void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
 		return;
 	}
 
-	// The second encoder changes the value of the setting that is open or highlighted, or else the volume
+	// The second encoder also moves through the settings list; in a setting, it changes the value, and outside of
+	// the menus the volume
 	if (m_Menu == TMenu::Settings)
-		OpenSetting(static_cast<u8>(m_nMenuIndex));
-	else if (!bInSetting)
-		OpenSetting(SettingVolume);
+	{
+		MoveListSelection(Event.nDelta);
+		return;
+	}
 
-	if (m_Menu == TMenu::SoundFonts || m_Menu == TMenu::DrumKits)
+	if (!bInSetting)
+	{
+		m_SettingsPage = TSettingsPage::Global;
+		OpenSetting(SettingVolume);
+	}
+
+	if (m_Menu == TMenu::SoundFonts || m_Menu == TMenu::DrumKits || m_Menu == TMenu::Presets || m_Menu == TMenu::PresetInstruments)
 	{
 		MoveListSelection(Event.nDelta);
 		return;
@@ -1132,15 +1252,182 @@ void CMT32Pi::ProcessEncoderEvent(const TEncoderEvent& Event)
 	const int nFactor = nInterval < ParameterFastTurnMicros ? 4 : nInterval < ParameterMediumTurnMicros ? 2 : 1;
 	m_nLastParameterTurnTime = nTicks;
 
-	// The number of channels has few steps
-	ChangeParameter(m_nSetting == SettingChannels ? Event.nDelta : Event.nDelta * nFactor);
+	// The number of channels and the TriplePlay's settings have few steps
+	const bool bFewSteps = m_nSetting == SettingChannels || m_nSetting >= SettingTPEnabled;	// Also the standby time
+	ChangeParameter(bFewSteps ? Event.nDelta : Event.nDelta * nFactor);
 
 	m_nMenuTime = m_pTimer->GetTicks();
 	UpdateMenu();
 }
 
+size_t CMT32Pi::GetSettingsItems(u8* pItems) const
+{
+	size_t nCount = 0;
+	auto Add = [&](u8 nSetting) { pItems[nCount++] = nSetting; };
+	const bool bTP = m_bTriplePlayEnabled;
+
+	switch (m_SettingsPage)
+	{
+		case TSettingsPage::Root:
+			Add(SettingPresetMenu);
+			Add(SettingGlobalMenu);
+			Add(SettingExit);
+			break;
+
+		// What the current preset holds, the list, and adding and deleting (presets are saved automatically)
+		case TSettingsPage::Preset:
+			if (m_Presets.GetCount())
+				Add(SettingPresetSelect);
+			if (m_nCurrentPreset >= 0)
+			{
+				Add(SettingSoundFont);
+				Add(SettingPresetInstrument);
+				Add(SettingEffectsMenu);
+				if (bTP)
+					Add(SettingPresetTPMenu);
+			}
+			Add(SettingPresetNew);
+			if (m_Presets.GetCount() > 1)
+				Add(SettingPresetDelete);
+			Add(SettingBack);
+			break;
+
+		// The TriplePlay's settings that belong to the preset
+		case TSettingsPage::PresetTP:
+		{
+			static const CTriplePlay::TSetting PatchSettings[] =
+			{
+				CTriplePlay::TSetting::Octave, CTriplePlay::TSetting::Semitone, CTriplePlay::TSetting::BendMode,
+				CTriplePlay::TSetting::BendRange, CTriplePlay::TSetting::ChannelMode,
+			};
+			for (CTriplePlay::TSetting Setting : PatchSettings)
+				Add(SettingTPFirst + static_cast<u8>(Setting));
+			for (u8 nString = 0; nString < CTriplePlay::Strings; ++nString)
+				Add(SettingTPSensitivity + nString);
+			Add(SettingBack);
+			break;
+		}
+
+		case TSettingsPage::Global:
+			Add(SettingVolume);
+			Add(SettingDrumKit);
+			Add(SettingChannels);
+			Add(SettingDisplayStandby);
+			Add(SettingGlobalTPMenu);
+			Add(SettingBack);
+			break;
+
+		// Reverb and chorus
+		case TSettingsPage::Effects:
+			for (u8 nEffect = 0; nEffect < static_cast<u8>(CSoundFontSynth::TEffect::Count); ++nEffect)
+				Add(SettingEffects + nEffect);
+			Add(SettingBack);
+			break;
+
+		// The TriplePlay's own settings
+		case TSettingsPage::GlobalTP:
+			Add(SettingTPEnabled);
+			if (bTP)
+			{
+				Add(SettingTPSoftwareMode);
+				Add(SettingTPProgramPresets);
+				Add(SettingTPFirst + static_cast<u8>(CTriplePlay::TSetting::ButtonAction));
+				Add(SettingTPFirst + static_cast<u8>(CTriplePlay::TSetting::BothButtonsAction));
+				Add(SettingTPFirst + static_cast<u8>(CTriplePlay::TSetting::HandPosition));
+				for (u8 nString = 0; nString < CTriplePlay::Strings; ++nString)
+					Add(SettingTPOpenString + nString);
+				if (m_pTriplePlay->HasBattery())
+					Add(SettingTPBattery);
+			}
+			Add(SettingBack);
+			break;
+	}
+
+	return nCount;
+}
+
+int CMT32Pi::FindSettingsItem(u8 nSetting) const
+{
+	u8 Items[MaxSettingsPageItems];
+	const size_t nCount = GetSettingsItems(Items);
+	for (size_t i = 0; i < nCount; ++i)
+		if (Items[i] == nSetting)
+			return i;
+
+	return -1;
+}
+
+void CMT32Pi::OpenSettingsPage(TSettingsPage Page, u8 nSelectedSetting)
+{
+	m_SettingsPage = Page;
+	m_nSetting = nSelectedSetting;
+	OpenMenu(TMenu::Settings);
+}
+
 void CMT32Pi::OpenSetting(u8 nSetting)
 {
+	switch (nSetting)
+	{
+		case SettingExit:
+			CloseMenu();
+			return;
+
+		// Submenus, and back to the menu that has them
+		case SettingPresetMenu:
+			OpenSettingsPage(TSettingsPage::Preset, m_Presets.GetCount() ? SettingPresetSelect : SettingPresetNew);
+			return;
+		case SettingPresetTPMenu:	OpenSettingsPage(TSettingsPage::PresetTP, SettingTPFirst); return;
+		case SettingEffectsMenu:	OpenSettingsPage(TSettingsPage::Effects, SettingEffects); return;
+		case SettingGlobalMenu:		OpenSettingsPage(TSettingsPage::Global, SettingVolume); return;
+		case SettingGlobalTPMenu:	OpenSettingsPage(TSettingsPage::GlobalTP, SettingTPEnabled); return;
+
+		case SettingBack:
+			switch (m_SettingsPage)
+			{
+				case TSettingsPage::Preset:	OpenSettingsPage(TSettingsPage::Root, SettingPresetMenu); break;
+				case TSettingsPage::PresetTP:	OpenSettingsPage(TSettingsPage::Preset, SettingPresetTPMenu); break;
+				case TSettingsPage::Effects:	OpenSettingsPage(TSettingsPage::Preset, SettingEffectsMenu); break;
+				case TSettingsPage::GlobalTP:	OpenSettingsPage(TSettingsPage::Global, SettingGlobalTPMenu); break;
+				default:			OpenSettingsPage(TSettingsPage::Root, SettingGlobalMenu); break;
+			}
+			return;
+
+		// The preset list, and the instruments for the current one
+		case SettingPresetSelect:
+			m_nSetting = nSetting;
+			OpenMenu(TMenu::Presets);
+			return;
+
+		case SettingPresetInstrument:
+			m_nSetting = nSetting;
+			if (m_pSoundFontSynth->GetPresetCount())
+				OpenMenu(TMenu::PresetInstruments);
+			else
+			{
+				CloseMenu();
+				LCDLog(TLCDLogType::Error, "No instruments!");
+			}
+			return;
+
+		// Actions rather than values; the list shows the result
+		case SettingPresetNew:
+			NewPreset();
+			OpenSettingsPage(TSettingsPage::Preset, SettingPresetSelect);
+			return;
+
+		case SettingPresetDelete:
+			DeletePreset();
+			OpenSettingsPage(TSettingsPage::Preset, SettingPresetSelect);
+			return;
+
+		// Only shown
+		case SettingTPBattery:
+			return;
+
+		default:
+			break;
+	}
+
 	m_nSetting = nSetting;
 
 	if (nSetting == SettingSoundFont)
@@ -1156,19 +1443,408 @@ void CMT32Pi::OpenSetting(u8 nSetting)
 	}
 }
 
-const char* CMT32Pi::GetSettingName(u8 nSetting) const
+void CMT32Pi::UpdateTriplePlayStatus()
 {
-	switch (nSetting)
+	// The transpose (in octaves) and bend mode of the guitar's patch, which its buttons usually change
+	char Main[CUserInterface::StatusTextLength] = "";
+	char Side[CUserInterface::StatusTextLength] = "";
+	if (m_pTriplePlay->IsConnected())
 	{
-		case SettingVolume:	return "Volume";
-		case SettingChannels:	return "Channels shown";
-		case SettingDrumKit:	return "Drum kit";
-		case SettingSoundFont:	return "SoundFont";
-		default:		return CSoundFontSynth::GetEffectInfo(static_cast<CSoundFontSynth::TEffect>(nSetting - SettingEffects)).pName;
+		// In octaves and the semitones beyond them: "Oct. +1", "Oct. +1 +3 semi", "-2 semi"
+		const int nTranspose = m_pTriplePlay->GetTranspose();
+		const int nOctaves = nTranspose / 12;
+		const int nSemitones = nTranspose - nOctaves * 12;
+
+		if (!nSemitones && !nOctaves)
+			snprintf(Main, sizeof(Main), "Oct. 0");
+		else if (!nSemitones)
+			snprintf(Main, sizeof(Main), "Oct. %+d", nOctaves);
+		else if (!nOctaves)
+			snprintf(Main, sizeof(Main), "%+d semi", nSemitones);
+		else
+			snprintf(Main, sizeof(Main), "Oct. %+d %+d semi", nOctaves, nSemitones);
+
+		m_pTriplePlay->FormatSetting(CTriplePlay::TSetting::BendMode, Side, sizeof(Side));
+	}
+	else if (m_bTriplePlayEnabled && m_pTriplePlay->HasNoReply())
+		snprintf(Main, sizeof(Main), "TP: no reply");
+
+	m_UserInterface.SetStatusText(Main, Side);
+}
+
+void CMT32Pi::SetTriplePlayEnabled(bool bEnabled)
+{
+	if (bEnabled == m_bTriplePlayEnabled)
+		return;
+
+	// Without the support, the TriplePlay has to perform its buttons itself again
+	m_pTriplePlay->SetSoftwareMode(bEnabled && m_bTriplePlaySoftwareMode);
+	m_bTriplePlayEnabled = bEnabled;
+
+	// The current preset's settings
+	if (bEnabled && m_nCurrentPreset >= 0)
+		ApplyPreset(m_nCurrentPreset);
+
+	m_LastState.nTriplePlay = bEnabled;
+	DeferSaveLastState();
+}
+
+bool CMT32Pi::GetCurrentInstrument(const char** ppSoundFontPath, int* pBank, int* pProgram)
+{
+	// The instrument of the first channels
+	CSoundFontSynth::TDisplayInfo Info;
+	m_pSoundFontSynth->GetDisplayInfo(Info);
+	*ppSoundFontPath = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontPath(m_pSoundFontSynth->GetSoundFontIndex());
+	*pBank = Info.nBank;
+	*pProgram = Info.nProgram;
+
+	return Info.ProgramName[0] && *ppSoundFontPath;
+}
+
+void CMT32Pi::ApplyPreset(size_t nIndex)
+{
+	if (nIndex >= m_Presets.GetCount())
+		return;
+
+	// A copy, as applying it changes the current state, which isn't saved back into it meanwhile
+	const CPresets::TPreset Preset = m_Presets.Get(nIndex);
+	LOGNOTE("Preset %u: %s", static_cast<unsigned>(nIndex + 1), Preset.Name);
+
+	m_bApplyingPreset = true;
+	m_nCurrentPreset = nIndex;
+	m_LastState.nPreset = nIndex;
+	DeferSaveLastState();
+	UpdatePresetLabel();
+
+	// SoundFont, then the instrument from it (both only loaded if they aren't already)
+	size_t nSoundFont;
+	CSoundFontManager& SoundFonts = m_pSoundFontSynth->GetSoundFontManager();
+	if (SoundFonts.FindSoundFont(Preset.SoundFontPath, &nSoundFont) && nSoundFont != m_pSoundFontSynth->GetSoundFontIndex())
+		SwitchSoundFont(nSoundFont);
+
+	size_t nInstrument;
+	if (m_pSoundFontSynth->FindPreset(Preset.nBank, Preset.nProgram, &nInstrument))
+		ApplyProgramChange(nInstrument);
+	else
+		LCDLog(TLCDLogType::Warning, "Instrument not found!");
+
+	if (Preset.bHasEffects)
+	{
+		// Only those that change: setting the chorus restarts its modulation
+		for (u8 nEffect = 0; nEffect < CPresets::EffectCount; ++nEffect)
+		{
+			const auto Effect = static_cast<CSoundFontSynth::TEffect>(nEffect);
+			const float nDifference = m_pSoundFontSynth->GetEffect(Effect) - Preset.Effects[nEffect];
+			if (nDifference > 0.001f || nDifference < -0.001f)
+				m_pSoundFontSynth->SetEffect(Effect, Preset.Effects[nEffect]);
+		}
+		m_LastState.Effects = m_pSoundFontSynth->GetEffectOverrides();
+	}
+
+	// The TriplePlay's settings (sent once it's connected, if it isn't yet; only those that differ)
+	if (m_bTriplePlayEnabled)
+	{
+		auto Value = [](int nValue) { return nValue != CPresets::Unknown ? nValue : CTriplePlay::Unknown; };
+
+		// The transpose is performed here, and set directly: in a profile, -1 semitone would read as unknown
+		if (Preset.nTPTranspose != CPresets::Unknown)
+			m_pTriplePlay->SetTranspose(Preset.nTPTranspose);
+
+		CTriplePlay::TProfile Profile;
+		Profile.nTranspose = CTriplePlay::Unknown;
+		Profile.nBendMode = Value(Preset.nTPBendMode);
+		Profile.nBendRange = Value(Preset.nTPBendRange);
+		Profile.nChannelMode = Value(Preset.nTPChannelMode);
+		for (u8 nString = 0; nString < CTriplePlay::Strings; ++nString)
+			Profile.Sensitivity[nString] = Value(Preset.TPSensitivity[nString]);
+		m_pTriplePlay->SetProfile(Profile);
+	}
+
+	m_bApplyingPreset = false;
+}
+
+bool CMT32Pi::GetCurrentPresetState(CPresets::TPreset& Preset)
+{
+	const char* pSoundFontPath;
+	int nBank, nProgram;
+	if (!GetCurrentInstrument(&pSoundFontPath, &nBank, &nProgram))
+		return false;
+
+	CSoundFontSynth::TDisplayInfo Info;
+	m_pSoundFontSynth->GetDisplayInfo(Info);
+	snprintf(Preset.Name, sizeof(Preset.Name), "%s", Info.ProgramName);
+	snprintf(Preset.SoundFontPath, sizeof(Preset.SoundFontPath), "%s", pSoundFontPath);
+	Preset.nBank = nBank;
+	Preset.nProgram = nProgram;
+
+	Preset.bHasEffects = true;
+	for (u8 nEffect = 0; nEffect < CPresets::EffectCount; ++nEffect)
+		Preset.Effects[nEffect] = m_pSoundFontSynth->GetEffect(static_cast<CSoundFontSynth::TEffect>(nEffect));
+
+	// The transpose is performed here; what the TriplePlay hasn't reported (e.g. before it is connected) is left as it is
+	if (m_bTriplePlayEnabled)
+	{
+		auto Take = [](int nValue, int& nStored) { if (nValue != CTriplePlay::Unknown) nStored = nValue; };
+
+		CTriplePlay::TProfile Profile;
+		m_pTriplePlay->GetProfile(Profile);
+		Preset.nTPTranspose = m_pTriplePlay->GetTranspose();
+		Take(Profile.nBendMode, Preset.nTPBendMode);
+		Take(Profile.nBendRange, Preset.nTPBendRange);
+		Take(Profile.nChannelMode, Preset.nTPChannelMode);
+		for (u8 nString = 0; nString < CTriplePlay::Strings; ++nString)
+			Take(Profile.Sensitivity[nString], Preset.TPSensitivity[nString]);
+	}
+
+	return true;
+}
+
+void CMT32Pi::CapturePreset()
+{
+	// The current preset follows every change; it is saved once the changes have settled
+	if (m_bApplyingPreset)
+		return;
+
+	// There is always one once there is an instrument
+	if (!m_Presets.GetCount())
+	{
+		CPresets::TPreset Preset;
+		CPresets::Clear(Preset);
+		if (GetCurrentPresetState(Preset))
+			NewPreset();
+		return;
+	}
+
+	if (m_nCurrentPreset < 0 || static_cast<size_t>(m_nCurrentPreset) >= m_Presets.GetCount())
+		return;
+
+	const CPresets::TPreset& Stored = m_Presets.Get(m_nCurrentPreset);
+	CPresets::TPreset Preset = Stored;
+	if (!GetCurrentPresetState(Preset))
+		return;
+
+	const bool bSame = !strcmp(Preset.Name, Stored.Name) && !strcmp(Preset.SoundFontPath, Stored.SoundFontPath)
+			   && Preset.nBank == Stored.nBank && Preset.nProgram == Stored.nProgram
+			   && Stored.bHasEffects && !memcmp(Preset.Effects, Stored.Effects, sizeof(Preset.Effects))
+			   && Preset.nTPTranspose == Stored.nTPTranspose && Preset.nTPBendMode == Stored.nTPBendMode
+			   && Preset.nTPBendRange == Stored.nTPBendRange && Preset.nTPChannelMode == Stored.nTPChannelMode
+			   && !memcmp(Preset.TPSensitivity, Stored.TPSensitivity, sizeof(Preset.TPSensitivity));
+	if (bSame)
+		return;
+
+	const bool bOtherInstrument = strcmp(Preset.SoundFontPath, Stored.SoundFontPath) || Preset.nBank != Stored.nBank
+				      || Preset.nProgram != Stored.nProgram;
+
+	m_Presets.Replace(m_nCurrentPreset, Preset);
+	m_bPresetChanged = true;
+	m_nPresetChangeTime = m_pTimer->GetTicks();
+
+	// Its new instrument is the one kept in memory now (Stored has been replaced)
+	if (bOtherInstrument)
+		UpdatePinnedInstruments();
+}
+
+void CMT32Pi::NewPreset()
+{
+	// From the current state
+	CPresets::TPreset Preset;
+	CPresets::Clear(Preset);
+	if (!GetCurrentPresetState(Preset))
+	{
+		LCDLog(TLCDLogType::Warning, "No instrument!");
+		return;
+	}
+
+	if (!m_Presets.Add(Preset))
+	{
+		LCDLog(TLCDLogType::Warning, "No more presets!");
+		return;
+	}
+
+	m_nCurrentPreset = m_Presets.GetCount() - 1;
+	m_LastState.nPreset = m_nCurrentPreset;
+	DeferSaveLastState();
+	UpdatePresetLabel();
+	UpdatePinnedInstruments();
+
+	m_bPresetChanged = true;
+	m_nPresetChangeTime = m_pTimer->GetTicks();
+}
+
+void CMT32Pi::DeletePreset()
+{
+	// There is always a current preset
+	if (m_nCurrentPreset < 0 || m_Presets.GetCount() < 2)
+		return;
+
+	m_Presets.Delete(m_nCurrentPreset);
+
+	// The preset that moved into its place is current now, without changing the sound
+	if (static_cast<size_t>(m_nCurrentPreset) >= m_Presets.GetCount())
+		m_nCurrentPreset = static_cast<int>(m_Presets.GetCount()) - 1;
+	m_LastState.nPreset = m_nCurrentPreset;
+	DeferSaveLastState();
+	UpdatePresetLabel();
+	UpdatePinnedInstruments();
+}
+
+void CMT32Pi::UpdatePresetLabel()
+{
+	// Shown before the instrument's number on the home screen
+	char Label[16] = "";
+	if (m_nCurrentPreset >= 0)
+		snprintf(Label, sizeof(Label), "P%d", m_nCurrentPreset + 1);
+	m_UserInterface.SetPresetLabel(Label);
+}
+
+void CMT32Pi::SetTriplePlaySoftwareMode(bool bSoftwareMode)
+{
+	if (bSoftwareMode == m_bTriplePlaySoftwareMode)
+		return;
+
+	m_bTriplePlaySoftwareMode = bSoftwareMode;
+	if (m_bTriplePlayEnabled)
+		m_pTriplePlay->SetSoftwareMode(bSoftwareMode);
+
+	m_LastState.nTriplePlaySoftwareMode = bSoftwareMode;
+	DeferSaveLastState();
+}
+
+void CMT32Pi::SetTriplePlayProgramPresets(bool bOn)
+{
+	if (bOn == m_bTriplePlayProgramPresets)
+		return;
+
+	m_bTriplePlayProgramPresets = bOn;
+	m_pTriplePlay->SetProgramsToHost(bOn);
+	m_nTriplePlayProgram = -1;
+
+	m_LastState.nTriplePlayProgramPresets = bOn;
+	DeferSaveLastState();
+}
+
+void CMT32Pi::UpdateTriplePlayPrograms()
+{
+	// The program change it sent last (one per channel it plays on, so the same one several times)
+	const int nProgram = m_nTriplePlayProgram;
+	m_nTriplePlayProgram = -1;
+	const int nCount = static_cast<int>(m_Presets.GetCount());
+
+	if (nProgram >= 0 && nCount)
+	{
+		if (nProgram >= nCount)
+			LCDLog(TLCDLogType::Warning, "No preset %d!", nProgram + 1);
+		else if (nProgram != m_nCurrentPreset)
+			ApplyPreset(nProgram);
+	}
+
+	// Its buttons' program up/down in software mode, round the list as the footswitches
+	const int nStep = m_pTriplePlay->TakeProgramStep();
+	if (nStep && nCount)
+	{
+		const int nCurrent = m_nCurrentPreset >= 0 ? m_nCurrentPreset : (nStep > 0 ? -1 : 0);
+		ApplyPreset(((nCurrent + nStep) % nCount + nCount) % nCount);
 	}
 }
 
-void CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction)
+void CMT32Pi::UpdatePinnedInstruments()
+{
+	// The instruments of the presets from the current SoundFont stay in memory, so that switching
+	// between them doesn't load anything (loading interrupts the sound)
+	int Banks[CSoundFontSynth::MaxPinnedInstruments];
+	int Programs[CSoundFontSynth::MaxPinnedInstruments];
+	size_t nCount = 0;
+
+	const char* pSoundFontPath = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontPath(m_pSoundFontSynth->GetSoundFontIndex());
+	if (pSoundFontPath)
+	{
+		// The current one first, then those that follow it, as they are the likeliest to come next
+		const size_t nPresets = m_Presets.GetCount();
+		const size_t nFirst = m_nCurrentPreset >= 0 ? m_nCurrentPreset : 0;
+		for (size_t i = 0; i < nPresets && nCount < CSoundFontSynth::MaxPinnedInstruments; ++i)
+		{
+			const CPresets::TPreset& Preset = m_Presets.Get((nFirst + i) % nPresets);
+			if (strcmp(Preset.SoundFontPath, pSoundFontPath))
+				continue;
+			Banks[nCount] = Preset.nBank;
+			Programs[nCount] = Preset.nProgram;
+			++nCount;
+		}
+	}
+
+	m_pSoundFontSynth->SetPinnedInstruments(Banks, Programs, nCount);
+}
+
+const char* CMT32Pi::GetSettingName(u8 nSetting) const
+{
+	// The TriplePlay's settings are in its own submenus, so they don't need its name
+	static const char* const TPNames[] =
+	{
+		"Octave", "Semitones", "Bend mode", "Bend range", "Channels", "Up/Down buttons", "Both buttons", "Hand position",
+	};
+	static_assert(Utility::ArraySize(TPNames) == static_cast<size_t>(CTriplePlay::TSetting::Count), "TriplePlay setting names");
+
+	// 1 = high E
+	static const char* const SensitivityNames[CTriplePlay::Strings] =
+	{
+		"Sens. string 1 (e)", "Sens. string 2 (B)", "Sens. string 3 (G)",
+		"Sens. string 4 (D)", "Sens. string 5 (A)", "Sens. string 6 (E)",
+	};
+
+	switch (nSetting)
+	{
+		case SettingVolume:		return "Volume";
+		case SettingChannels:		return "Channels shown";
+		case SettingDisplayStandby:	return "Display standby";
+		case SettingDrumKit:		return "Drum kit";
+		case SettingSoundFont:		return "SoundFont";
+		case SettingTPEnabled:		return "TriplePlay";
+		case SettingTPSoftwareMode:	return "Software mode";
+		case SettingTPProgramPresets:	return "Program change";
+		case SettingPresetMenu:		return "Preset";
+		case SettingPresetSelect:	return "Preset";
+		case SettingPresetInstrument:	return "Instrument";
+		case SettingPresetNew:		return "+ New preset";
+		case SettingPresetDelete:	return "Delete preset";
+		case SettingTPBattery:		return "Battery";
+		case SettingPresetTPMenu:	return "TriplePlay";
+		case SettingGlobalMenu:		return "Global";
+		case SettingGlobalTPMenu:	return "TriplePlay";
+		case SettingEffectsMenu:	return "Effects";
+		case SettingBack:		return "Back";
+		case SettingExit:		return "Exit";
+		default:			break;
+	}
+
+	static const char* const OpenStringNames[CTriplePlay::Strings] =
+	{
+		"Open string 1", "Open string 2", "Open string 3", "Open string 4", "Open string 5", "Open string 6",
+	};
+
+	if (nSetting >= SettingTPOpenString)
+		return OpenStringNames[nSetting - SettingTPOpenString];
+	if (nSetting >= SettingTPSensitivity)
+		return SensitivityNames[nSetting - SettingTPSensitivity];
+	if (nSetting >= SettingTPFirst)
+		return TPNames[nSetting - SettingTPFirst];
+
+	return CSoundFontSynth::GetEffectInfo(static_cast<CSoundFontSynth::TEffect>(nSetting - SettingEffects)).pName;
+}
+
+const char* CMT32Pi::GetSettingsPageTitle() const
+{
+	switch (m_SettingsPage)
+	{
+		case TSettingsPage::Preset:		return "Preset";
+		case TSettingsPage::PresetTP:		return "TriplePlay: preset";
+		case TSettingsPage::Global:		return "Global";
+		case TSettingsPage::Effects:		return "Effects";
+		case TSettingsPage::GlobalTP:		return "TriplePlay";
+		default:				return "Settings";
+	}
+}
+
+bool CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction)
 {
 	using TPresetList = CSoundFontSynth::TPresetList;
 	float nFraction = 0.0f;
@@ -1184,17 +1860,67 @@ void CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float
 		snprintf(pBuffer, nSize, "%d", nChannels);
 		nFraction = static_cast<float>(nChannels) / MaxDisplayChannels;
 	}
+	else if (nSetting == SettingDisplayStandby)
+	{
+		const unsigned nSeconds = m_UserInterface.GetStandbyTimeout();
+		if (!nSeconds)
+			snprintf(pBuffer, nSize, "Off");
+		else if (nSeconds % 60)
+			snprintf(pBuffer, nSize, "%u s", nSeconds);
+		else
+			snprintf(pBuffer, nSize, "%u min", nSeconds / 60);
+		nFraction = static_cast<float>(GetStandbyStep(nSeconds)) / (Utility::ArraySize(StandbySteps) - 1);
+	}
 	else if (nSetting == SettingDrumKit)
 	{
 		const size_t nIndex = m_pSoundFontSynth->GetChannelPresetIndex(CSoundFontSynth::DrumChannel, TPresetList::DrumKits);
 		m_pSoundFontSynth->FormatPresetName(nIndex, pBuffer, nSize, TPresetList::DrumKits);
 	}
+	else if (nSetting == SettingPresetInstrument)
+		m_pSoundFontSynth->FormatPresetName(m_pSoundFontSynth->GetChannelPresetIndex(0), pBuffer, nSize);
 	else if (nSetting == SettingSoundFont)
 	{
 		const char* pName = m_pSoundFontSynth->GetSoundFontManager().GetSoundFontName(m_pSoundFontSynth->GetSoundFontIndex());
 		snprintf(pBuffer, nSize, "%s", pName ? pName : "-");
 	}
-	else
+	else if (nSetting == SettingTPEnabled || nSetting == SettingTPSoftwareMode)
+	{
+		const bool bOn = nSetting == SettingTPEnabled ? m_bTriplePlayEnabled : m_bTriplePlaySoftwareMode;
+		snprintf(pBuffer, nSize, "%s", bOn ? "On" : "Off");
+		nFraction = bOn ? 1.0f : 0.0f;
+	}
+	else if (nSetting == SettingTPProgramPresets)
+	{
+		// What the TriplePlay's program changes select
+		snprintf(pBuffer, nSize, "%s", m_bTriplePlayProgramPresets ? "Preset" : "Instrument");
+		nFraction = m_bTriplePlayProgramPresets ? 1.0f : 0.0f;
+	}
+	else if (nSetting == SettingPresetSelect || nSetting == SettingPresetDelete)
+	{
+		// The current preset
+		if (m_nCurrentPreset >= 0 && static_cast<size_t>(m_nCurrentPreset) < m_Presets.GetCount())
+			snprintf(pBuffer, nSize, "P%d %s", m_nCurrentPreset + 1, m_Presets.Get(m_nCurrentPreset).Name);
+		else
+			snprintf(pBuffer, nSize, "-");
+	}
+	else if (nSetting == SettingPresetNew)
+		snprintf(pBuffer, nSize, "P%u", static_cast<unsigned>(m_Presets.GetCount() + 1));
+	else if (nSetting == SettingTPBattery)
+		m_pTriplePlay->FormatBattery(pBuffer, nSize);
+	else if (nSetting >= SettingTPSensitivity && nSetting < SettingTPSensitivity + CTriplePlay::Strings)
+	{
+		const int nLevel = m_pTriplePlay->GetStringSensitivity(nSetting - SettingTPSensitivity + 1);
+		if (nLevel)
+			snprintf(pBuffer, nSize, "%d", nLevel);
+		else
+			snprintf(pBuffer, nSize, "-");
+		nFraction = static_cast<float>(nLevel) / CTriplePlay::MaxSensitivity;
+	}
+	else if (nSetting >= SettingTPOpenString && nSetting < SettingTPOpenString + CTriplePlay::Strings)
+		m_pTriplePlay->FormatOpenString(nSetting - SettingTPOpenString + 1, pBuffer, nSize);
+	else if (nSetting >= SettingTPFirst && nSetting < SettingTPBattery)
+		m_pTriplePlay->FormatSetting(static_cast<CTriplePlay::TSetting>(nSetting - SettingTPFirst), pBuffer, nSize);
+	else if (nSetting >= SettingEffects && nSetting < SettingChannels)
 	{
 		const auto Effect = static_cast<CSoundFontSynth::TEffect>(nSetting - SettingEffects);
 		const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
@@ -1203,9 +1929,16 @@ void CMT32Pi::FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float
 		snprintf(pBuffer, nSize, "%.*f", Info.nDecimals, nValue);
 		nFraction = (nValue - Info.nMin) / (Info.nMax - Info.nMin);
 	}
+	else
+	{
+		// Submenus and the items that leave them have no value
+		*pBuffer = '\0';
+		return false;
+	}
 
 	if (pFraction)
 		*pFraction = nFraction;
+	return true;
 }
 
 void CMT32Pi::OpenMenu(TMenu Menu)
@@ -1213,24 +1946,34 @@ void CMT32Pi::OpenMenu(TMenu Menu)
 	m_Menu = Menu;
 	m_nMenuTime = m_pTimer->GetTicks();
 
-	if (Menu == TMenu::Instruments)
+	if (Menu == TMenu::Instruments || Menu == TMenu::PresetInstruments)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(0);
 	else if (Menu == TMenu::Settings)
 	{
-		// The setting that was open last is highlighted; no item is "in use"
-		m_nMenuIndex = m_nSetting;
-		m_nMenuCurrentIndex = SettingCount;
+		// The item that was open last is highlighted; no item is "in use"
+		const int nIndex = FindSettingsItem(m_nSetting);
+		m_nMenuIndex = nIndex >= 0 ? nIndex : 0;
+		m_nMenuCurrentIndex = MaxSettingsPageItems;
 	}
 	else if (Menu == TMenu::DrumKits)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetChannelPresetIndex(CSoundFontSynth::DrumChannel, CSoundFontSynth::TPresetList::DrumKits);
 	else if (Menu == TMenu::SoundFonts)
 		m_nMenuIndex = m_nMenuCurrentIndex = m_pSoundFontSynth->GetSoundFontIndex();
+	else if (Menu == TMenu::Presets)
+		m_nMenuIndex = m_nMenuCurrentIndex = m_nCurrentPreset >= 0 ? m_nCurrentPreset : 0;
 
 	UpdateMenu();
 }
 
-void CMT32Pi::CloseMenu()
+void CMT32Pi::CloseMenu(bool bKeepSettingsPosition)
 {
+	// The settings start from the top again, unless they were left only for the moment
+	if (IsSettingsMenu() && !bKeepSettingsPosition)
+	{
+		m_SettingsPage = TSettingsPage::Root;
+		m_nSetting = SettingPresetMenu;
+	}
+
 	m_Menu = TMenu::None;
 	m_UserInterface.HideMenu();
 }
@@ -1245,10 +1988,11 @@ void CMT32Pi::UpdateMenu()
 
 	if (m_Menu == TMenu::Parameter)
 	{
-		// Name and value with a gauge
+		// Name and value with a gauge; the position in the list, without "Back"/"Exit"
+		u8 Items[MaxSettingsPageItems];
 		Menu.Type = CUserInterface::TMenu::TType::Parameter;
-		Menu.nPage = m_nSetting + 1;
-		Menu.nPages = SettingCount;
+		Menu.nPage = FindSettingsItem(m_nSetting) + 1;
+		Menu.nPages = GetSettingsItems(Items) - 1;
 		snprintf(Menu.Title, sizeof(Menu.Title), "%s", GetSettingName(m_nSetting));
 		FormatSettingValue(m_nSetting, Menu.Value, sizeof(Menu.Value), &Menu.nFraction);
 
@@ -1269,12 +2013,17 @@ void CMT32Pi::UpdateMenu()
 		snprintf(Menu.Title, sizeof(Menu.Title), "%s", pName ? pName : "Instrument");
 	}
 	else if (m_Menu == TMenu::Settings)
-		snprintf(Menu.Title, sizeof(Menu.Title), "Settings");
+		snprintf(Menu.Title, sizeof(Menu.Title), "%s", GetSettingsPageTitle());
 	else
 	{
-		const char* const pTitle = m_Menu == TMenu::DrumKits ? "Drum kit" : "SoundFont";
+		const char* const pTitle = m_Menu == TMenu::DrumKits ? "Drum kit" : m_Menu == TMenu::Presets ? "Preset"
+					 : m_Menu == TMenu::PresetInstruments ? "Instrument" : "SoundFont";
 		snprintf(Menu.Title, sizeof(Menu.Title), "%s %d/%d", pTitle, static_cast<int>(m_nMenuIndex + 1), static_cast<int>(nCount));
 	}
+
+	u8 SettingsItems[MaxSettingsPageItems];
+	if (m_Menu == TMenu::Settings)
+		GetSettingsItems(SettingsItems);
 
 	for (int nRow = 0; nRow < static_cast<int>(CUserInterface::TMenu::ListRows); ++nRow)
 	{
@@ -1283,16 +2032,33 @@ void CMT32Pi::UpdateMenu()
 			continue;
 
 		char* pRow = Menu.Rows[nRow];
-		if (m_Menu == TMenu::Instruments)
+		if (m_Menu == TMenu::Instruments || m_Menu == TMenu::PresetInstruments)
 			m_pSoundFontSynth->FormatPresetName(nIndex, pRow, sizeof(Menu.Rows[nRow]));
 		else if (m_Menu == TMenu::DrumKits)
 			m_pSoundFontSynth->FormatPresetName(nIndex, pRow, sizeof(Menu.Rows[nRow]), TPresetList::DrumKits);
 		else if (m_Menu == TMenu::Settings)
 		{
-			// Name and current value, which is shortened if needed
-			snprintf(pRow, sizeof(Menu.Rows[nRow]), "%s: ", GetSettingName(static_cast<u8>(nIndex)));
+			// Name and current value, which is shortened if needed; submenus are marked
+			const u8 nSetting = SettingsItems[nIndex];
+			snprintf(pRow, sizeof(Menu.Rows[nRow]), "%s: ", GetSettingName(nSetting));
 			const size_t nLength = strlen(pRow);
-			FormatSettingValue(static_cast<u8>(nIndex), pRow + nLength, sizeof(Menu.Rows[nRow]) - nLength);
+			if (!FormatSettingValue(nSetting, pRow + nLength, sizeof(Menu.Rows[nRow]) - nLength))
+			{
+				const char* pName = GetSettingName(nSetting);
+				if (nSetting == SettingBack)
+					snprintf(pRow, sizeof(Menu.Rows[nRow]), "< %s", pName);
+				else if (nSetting == SettingExit)
+					snprintf(pRow, sizeof(Menu.Rows[nRow]), "%s", pName);
+				else
+					snprintf(pRow, sizeof(Menu.Rows[nRow]), "%s >", pName);
+			}
+		}
+		else if (m_Menu == TMenu::Presets)
+		{
+			// Number and name, which is shortened if needed
+			snprintf(pRow, sizeof(Menu.Rows[nRow]), "P%d ", nIndex + 1);
+			const size_t nLength = strlen(pRow);
+			snprintf(pRow + nLength, sizeof(Menu.Rows[nRow]) - nLength, "%s", m_Presets.Get(nIndex).Name);
 		}
 		else
 		{
@@ -1312,16 +2078,23 @@ size_t CMT32Pi::GetMenuListCount() const
 	switch (m_Menu)
 	{
 		case TMenu::Instruments:
+		case TMenu::PresetInstruments:
 			return m_pSoundFontSynth->GetPresetCount();
 
 		case TMenu::Settings:
-			return SettingCount;
+		{
+			u8 Items[MaxSettingsPageItems];
+			return GetSettingsItems(Items);
+		}
 
 		case TMenu::DrumKits:
 			return m_pSoundFontSynth->GetPresetCount(CSoundFontSynth::TPresetList::DrumKits);
 
 		case TMenu::SoundFonts:
 			return m_pSoundFontSynth->GetSoundFontManager().GetSoundFontCount();
+
+		case TMenu::Presets:
+			return m_Presets.GetCount();
 
 		default:
 			return 0;
@@ -1381,6 +2154,61 @@ void CMT32Pi::ChangeParameter(int nDelta)
 		return;
 	}
 
+	if (m_nSetting == SettingDisplayStandby)
+	{
+		const int nStep = Utility::Clamp(static_cast<int>(GetStandbyStep(m_UserInterface.GetStandbyTimeout())) + nDelta, 0, static_cast<int>(Utility::ArraySize(StandbySteps)) - 1);
+		m_UserInterface.SetStandbyTimeout(StandbySteps[nStep]);
+		m_LastState.nDisplayStandby = StandbySteps[nStep];
+		DeferSaveLastState();
+		return;
+	}
+
+	// Switches: turning right switches on, left off
+	if (m_nSetting == SettingTPEnabled)
+	{
+		SetTriplePlayEnabled(nDelta > 0);
+		return;
+	}
+
+	if (m_nSetting == SettingTPSoftwareMode)
+	{
+		SetTriplePlaySoftwareMode(nDelta > 0);
+		return;
+	}
+
+	if (m_nSetting == SettingTPProgramPresets)
+	{
+		SetTriplePlayProgramPresets(nDelta > 0);
+		return;
+	}
+
+	// Stored in the TriplePlay itself
+	if (m_nSetting >= SettingTPSensitivity && m_nSetting < SettingTPSensitivity + CTriplePlay::Strings)
+	{
+		// Not before the current value has been read, so that it can't be changed blindly
+		const u8 nString = m_nSetting - SettingTPSensitivity + 1;
+		const int nLevel = m_pTriplePlay->GetStringSensitivity(nString);
+		if (nLevel)
+			m_pTriplePlay->SetStringSensitivity(nString, nLevel + nDelta);
+		return;
+	}
+
+	if (m_nSetting >= SettingTPOpenString && m_nSetting < SettingTPOpenString + CTriplePlay::Strings)
+	{
+		m_pTriplePlay->ChangeOpenString(m_nSetting - SettingTPOpenString + 1, nDelta);
+		return;
+	}
+
+	// The TriplePlay's patch settings, button assignments and hand position monitor
+	if (m_nSetting >= SettingTPFirst && m_nSetting < SettingTPBattery)
+	{
+		m_pTriplePlay->ChangeSetting(static_cast<CTriplePlay::TSetting>(m_nSetting - SettingTPFirst), nDelta);
+		return;
+	}
+
+	if (m_nSetting < SettingEffects || m_nSetting >= SettingChannels)
+		return;
+
 	const auto Effect = static_cast<CSoundFontSynth::TEffect>(m_nSetting - SettingEffects);
 	const CSoundFontSynth::TEffectInfo& Info = CSoundFontSynth::GetEffectInfo(Effect);
 
@@ -1404,6 +2232,9 @@ void CMT32Pi::SwitchSoundFont(size_t nIndex)
 
 		// Keep the instrument if the new SoundFont has it
 		ApplyLastInstrument();
+
+		// The new synth keeps nothing in memory yet
+		UpdatePinnedInstruments();
 
 		// Handle any MIDI data that has been queued up while busy
 		PurgeMIDIBuffers();
@@ -1431,7 +2262,7 @@ void CMT32Pi::ApplyLastInstrument()
 	}
 }
 
-void CMT32Pi::ApplyProgramChange(size_t nIndex)
+bool CMT32Pi::ApplyProgramChange(size_t nIndex)
 {
 	bool bSamplesLoaded;
 	const bool bResult = m_pSoundFontSynth->SetChannelsPreset(nIndex, 0, ButtonProgramChannels, &bSamplesLoaded);
@@ -1446,6 +2277,7 @@ void CMT32Pi::ApplyProgramChange(size_t nIndex)
 		DeferSaveLastState();
 
 	Awaken();
+	return bResult;
 }
 
 bool CMT32Pi::ApplyDrumKit(size_t nIndex)
@@ -1490,6 +2322,9 @@ void CMT32Pi::DeferSaveLastState()
 {
 	m_nLastStateChangeTime = CTimer::Get()->GetTicks();
 	m_bLastStateChanged    = true;
+
+	// The SoundFont, instrument and effects also belong to the current preset
+	CapturePreset();
 }
 
 void CMT32Pi::LEDOn()
@@ -1565,6 +2400,28 @@ void CMT32Pi::USBMIDIDeviceRemovedHandler(CDevice* pDevice, void* pContext)
 // The following handlers are called from interrupt context, enqueue into ring buffer for main thread
 void CMT32Pi::USBMIDIPacketHandler(unsigned nCable, u8* pPacket, unsigned nLength)
 {
+	// The TriplePlay's second port carries its settings (and copies of the guitar's pitch bends), not notes to play.
+	// Its settings are taken from any port, as it isn't certain which one the controller answers on.
+	if (s_pThis->m_bTriplePlayEnabled && (nCable == CTriplePlay::CommandCable || CTriplePlay::IsCommandMessage(pPacket, nLength)))
+	{
+		s_pThis->m_pTriplePlay->ReceiveMessage(pPacket, nLength);
+		return;
+	}
+
+	if (s_pThis->m_bTriplePlayEnabled)
+	{
+		// Its program changes select presets (if there are any) instead of the synth's instrument
+		if (s_pThis->m_bTriplePlayProgramPresets && nLength == 2 && (pPacket[0] & 0xF0) == 0xC0 && s_pThis->m_Presets.GetCount())
+		{
+			s_pThis->m_nTriplePlayProgram = pPacket[1] & 0x7F;
+			return;
+		}
+
+		// The guitar's notes, with the transpose (of the current preset)
+		if (!s_pThis->m_pTriplePlay->TransposeMessage(pPacket, nLength))
+			return;
+	}
+
 	IRQMIDIReceiveHandler(pPacket, nLength);
 }
 

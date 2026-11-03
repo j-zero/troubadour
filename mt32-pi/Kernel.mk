@@ -29,6 +29,8 @@ OBJS		:=	src/config.o \
 			src/power.o \
 			src/soundfontmanager.o \
 			src/synth/soundfontsynth.o \
+			src/tripleplay.o \
+			src/presets.o \
 			src/zoneallocator.o
 
 EXTRACLEAN	+=	src/*.d src/*.o \

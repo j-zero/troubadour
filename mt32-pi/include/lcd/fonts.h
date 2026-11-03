@@ -46,8 +46,12 @@ struct TUIFont
 	const u8* pData;
 };
 
+extern const TUIFont FontTiny;
 extern const TUIFont FontSmall;
 extern const TUIFont FontMedium;
 extern const TUIFont FontLarge;
+
+// Symbols in the fonts, after the ASCII characters (as strings, to be put into text)
+#define UI_SYMBOL_FLOPPY_DISK "\x7F"
 
 #endif

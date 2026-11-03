@@ -67,6 +67,12 @@ CFG(mister,			bool,				ControlMister,				false						)
 CFG(switch_timeout,		int,				ControlSwitchTimeout,			3						)
 END_SECTION
 
+BEGIN_SECTION(tripleplay)
+CFG(enabled,			bool,				TriplePlayEnabled,			false						)
+CFG(software_mode,		bool,				TriplePlaySoftwareMode,			true						)
+CFG(program_change_presets,	bool,				TriplePlayProgramChangePresets,		true						)
+END_SECTION
+
 BEGIN_SECTION(fluidsynth)
 CFG(soundfont,			int,				FluidSynthSoundFont,			0						)
 CFG(polyphony,			int,				FluidSynthPolyphony,			200						)
@@ -92,6 +98,7 @@ CFG(spi_dc_pin,			int,				LCDSPIDCPin,				25						)
 CFG(spi_reset_pin,		int,				LCDSPIResetPin,				5						)
 CFG(spi_backlight_pin,		int,				LCDSPIBacklightPin,			6						)
 CFG(spi_clock_speed,		int,				LCDSPIClockSpeed,			16000000					)
+CFG(standby_timeout,		int,				LCDStandbyTimeout,			0						)
 END_SECTION
 
 BEGIN_SECTION(network)

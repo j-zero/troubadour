@@ -93,6 +93,9 @@ public:
 
 	void ShowSystemMessage(const char* pMessage, bool bSpinner = false, TMessageType Type = TMessageType::Notice);
 	void ShowLoadProgress(u64 nLoadedBytes, u64 nTotalBytes);
+	// What is loading (e.g. the instrument), shown with the progress; empty for nothing in particular
+	static constexpr size_t LoadingTextLength = 48;
+	void SetLoadingText(const char* pText);
 	void ClearSpinnerMessage();
 	void DisplayImage(TImage Image);
 	void ShowSysExText(TSysExDisplayMessage Type, const u8* pMessage, size_t nSize, u8 nOffset);
@@ -106,9 +109,23 @@ public:
 
 	void SetVolume(u8 nVolume) { m_nVolume = nVolume; }
 
+	// Home screen: a line below the channel levels, and a short text next to the volume; empty for none
+	static constexpr size_t StatusTextLength = 32;
+	void SetStatusText(const char* pMain, const char* pSide);
+	// Before the instrument's number on the home screen (e.g. the preset); empty for none
+	void SetPresetLabel(const char* pLabel);
+
 	// Number of MIDI channels whose levels are shown on the home screen, starting with channel 1
 	void SetDisplayChannels(u8 nChannels) { m_nDisplayChannels = nChannels; }
 	u8 GetDisplayChannels() const { return m_nDisplayChannels; }
+
+	// The display turns off after this many seconds without activity on the home screen (0: never); anything else
+	// that is shown turns it on again
+	static constexpr unsigned MaxStandbyTimeout = 3600;
+	void SetStandbyTimeout(unsigned nSeconds) { m_nStandbyTimeout = nSeconds; }
+	unsigned GetStandbyTimeout() const { return m_nStandbyTimeout; }
+	// Called on activity (also from interrupt context); turns the display on again
+	void NotifyActivity() { m_nActivityCount = m_nActivityCount + 1; }
 
 private:
 	enum class TState
@@ -128,7 +145,7 @@ private:
 	void DrawLogo(int nY);
 	void DrawHome(CSoundFontSynth& Synth, unsigned int nTicks);
 	void DrawChannelLevels(const float* pLevels, const float* pPeaks, u8 nChannels, int nY1, int nY2);
-	void DrawVolume(u8 nVolume, int nY);
+	void DrawVolume(u8 nVolume, int nY, const char* pSideText);
 	void DrawGauge(int nInnerRadius, int nOuterRadius, float nFraction, CCanvas::TColor Color);
 	void DrawMessage(const char* pMessage, CCanvas::TColor Color, bool bSpinner, unsigned int nTicks);
 	void DrawLoadProgress(u64 nLoadedBytes, u64 nTotalBytes, int nInnerRadius, int nOuterRadius, int nPercentY);
@@ -152,6 +169,13 @@ private:
 	volatile u8 m_nVolume;
 	volatile u8 m_nDisplayChannels;
 
+	// Display standby; the time is kept by the UI task, which only sees the activity counter change
+	volatile unsigned m_nStandbyTimeout;
+	volatile unsigned m_nActivityCount;
+	unsigned m_nSeenActivityCount;
+	unsigned m_nLastActivityTime;
+	bool m_bStandby;
+
 	// Text set from another core
 	CSpinLock m_Lock;
 	char m_SystemMessageTextBuffer[SystemMessageTextBufferSize];
@@ -162,6 +186,10 @@ private:
 	char m_SysExTextBuffer[SyxExTextBufferSize];
 	u8 m_SysExPixelBuffer[SysExPixelBufferSize];
 	TMenu m_Menu;
+	char m_LoadingText[LoadingTextLength];
+	char m_PresetLabel[StatusTextLength];
+	char m_StatusMain[StatusTextLength];
+	char m_StatusSide[StatusTextLength];
 };
 
 #endif

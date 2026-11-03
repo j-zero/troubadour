@@ -62,6 +62,8 @@
 #include "power.h"
 #include "ringbuffer.h"
 #include "synth/soundfontsynth.h"
+#include "tripleplay.h"
+#include "presets.h"
 
 //#define MONITOR_TEMPERATURE
 
@@ -91,15 +93,13 @@ private:
 	// (one channel per string for MIDI guitars such as the Fishman TriplePlay)
 	static constexpr u8 ButtonProgramChannels = 6;
 
-	// Footswitches (buttons 1 and 2): each one moves through the instrument list, both together select
-	static constexpr u8 FootswitchMaskBoth = 0b11;
-
 	// Settings are saved once they haven't changed for this long, so that turning the encoder doesn't write each step
 	static constexpr unsigned LastStateSaveDelayMillis = 2000;
 
 	// Menus of the simple_encoder scheme: the first encoder selects the instrument from a list. Pressing the second
-	// one opens the settings list, where the first encoder selects a setting and opens it; the second encoder then
-	// changes its value (or selects the drum kit/SoundFont from a list), and pressing it returns to the settings list.
+	// one opens the settings, with submenus; either encoder selects an item and pressing the second one opens it. The
+	// second encoder then changes its value (or selects the drum kit/SoundFont from a list), and pressing it returns
+	// to the list.
 	enum class TMenu
 	{
 		None,
@@ -108,6 +108,8 @@ private:
 		Parameter,
 		DrumKits,
 		SoundFonts,
+		Presets,
+		PresetInstruments,	// The instrument of the current preset, chosen in the settings
 	};
 
 	static constexpr unsigned MenuTimeoutMillis = 8000;
@@ -116,14 +118,60 @@ private:
 	static constexpr unsigned ParameterFastTurnMicros = 25000;
 	static constexpr unsigned ParameterMediumTurnMicros = 60000;
 
-	// Items of the settings list
+	// Items of the settings menus
 	static constexpr u8 SettingVolume    = 0;
 	static constexpr u8 SettingEffects   = 1;
 	static constexpr u8 SettingChannels  = SettingEffects + static_cast<u8>(CSoundFontSynth::TEffect::Count);
 	static constexpr u8 SettingDrumKit   = SettingChannels + 1;
 	static constexpr u8 SettingSoundFont = SettingDrumKit + 1;
-	static constexpr u8 SettingCount     = SettingSoundFont + 1;
+	// TriplePlay: switches for the support and the software mode, its patch settings, the button assignments, the
+	// battery and the string sensitivities
+	static constexpr u8 SettingTPEnabled      = SettingSoundFont + 1;
+	static constexpr u8 SettingTPSoftwareMode = SettingTPEnabled + 1;
+	static constexpr u8 SettingTPFirst        = SettingTPSoftwareMode + 1;	// CTriplePlay::TSetting, in its order
+	static constexpr u8 SettingTPBattery      = SettingTPFirst + static_cast<u8>(CTriplePlay::TSetting::Count);
+	static constexpr u8 SettingTPSensitivity  = SettingTPBattery + 1;
+	static constexpr u8 SettingTPOpenString   = SettingTPSensitivity + CTriplePlay::Strings;
+	// Submenus, and the items that leave them
+	static constexpr u8 SettingPresetMenu       = SettingTPOpenString + CTriplePlay::Strings;
+	static constexpr u8 SettingPresetTPMenu     = SettingPresetMenu + 1;
+	static constexpr u8 SettingGlobalMenu       = SettingPresetTPMenu + 1;
+	static constexpr u8 SettingGlobalTPMenu     = SettingGlobalMenu + 1;
+	static constexpr u8 SettingEffectsMenu      = SettingGlobalTPMenu + 1;
+	static constexpr u8 SettingBack             = SettingEffectsMenu + 1;
+	static constexpr u8 SettingExit             = SettingBack + 1;
+	// Presets: the list, and adding and deleting
+	static constexpr u8 SettingPresetSelect     = SettingExit + 1;
+	static constexpr u8 SettingPresetNew        = SettingPresetSelect + 1;
+	static constexpr u8 SettingPresetDelete     = SettingPresetNew + 1;
+	static constexpr u8 SettingDisplayStandby   = SettingPresetDelete + 1;
+	static constexpr u8 SettingPresetInstrument = SettingDisplayStandby + 1;
+	static constexpr u8 SettingTPProgramPresets = SettingPresetInstrument + 1;
+
+	// Settings > Preset holds what is stored in the current preset, Settings > Global everything else
+	enum class TSettingsPage
+	{
+		Root,
+		Preset,
+		PresetTP,
+		Effects,
+		Global,
+		GlobalTP,
+	};
+
+	static constexpr size_t MaxSettingsPageItems = 24;
 	static constexpr u8 MaxDisplayChannels = 16;
+
+	// Display standby times that can be chosen in the settings (seconds; 0 for never)
+	static constexpr unsigned StandbySteps[] = { 0, 15, 30, 60, 120, 300, 600, 900, 1800, 3600 };
+	// The last of them that isn't longer than nSeconds (which may be any value from the config file)
+	static size_t GetStandbyStep(unsigned nSeconds)
+	{
+		size_t nStep = 0;
+		while (nStep + 1 < sizeof(StandbySteps) / sizeof(*StandbySteps) && StandbySteps[nStep + 1] <= nSeconds)
+			++nStep;
+		return nStep;
+	}
 
 	// CPower
 	virtual void OnEnterPowerSavingMode() override;
@@ -165,15 +213,42 @@ private:
 	void ProcessEventQueue();
 	void ProcessButtonEvent(const TButtonEvent& Event);
 	void ProcessFootswitchEvent(const TButtonEvent& Event);
+	void ProcessEncoder2ButtonEvent(const TButtonEvent& Event);
 	void ProcessEncoderEvent(const TEncoderEvent& Event);
 
 	// Menus
 	void OpenMenu(TMenu Menu);
-	void CloseMenu();
+	// Keeping the position, the settings open at the same submenu and item the next time
+	void CloseMenu(bool bKeepSettingsPosition = false);
 	void UpdateMenu();
+	// The items of the current settings page; returns their number
+	size_t GetSettingsItems(u8* pItems) const;
+	int FindSettingsItem(u8 nSetting) const;
+	void OpenSettingsPage(TSettingsPage Page, u8 nSelectedSetting);
+	bool IsSettingsMenu() const
+	{
+		return m_Menu == TMenu::Settings || m_Menu == TMenu::Parameter || m_Menu == TMenu::DrumKits || m_Menu == TMenu::SoundFonts
+		    || m_Menu == TMenu::Presets || m_Menu == TMenu::PresetInstruments;
+	}
 	void OpenSetting(u8 nSetting);
+	void UpdateTriplePlayStatus();
+	void SetTriplePlayEnabled(bool bEnabled);
+	void SetTriplePlaySoftwareMode(bool bSoftwareMode);
+	void SetTriplePlayProgramPresets(bool bOn);
+	void UpdateTriplePlayPrograms();
+	void UpdatePinnedInstruments();
+	bool GetCurrentInstrument(const char** ppSoundFontPath, int* pBank, int* pProgram);
+	// Presets
+	void ApplyPreset(size_t nIndex);
+	bool GetCurrentPresetState(CPresets::TPreset& Preset);
+	void CapturePreset();
+	void NewPreset();
+	void DeletePreset();
+	void UpdatePresetLabel();
 	const char* GetSettingName(u8 nSetting) const;
-	void FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction = nullptr);
+	const char* GetSettingsPageTitle() const;
+	// Returns false for items without a value (submenus, "Back", "Exit")
+	bool FormatSettingValue(u8 nSetting, char* pBuffer, size_t nSize, float* pFraction = nullptr);
 	size_t GetMenuListCount() const;
 	void MoveListSelection(int nDelta);
 	void MoveInstrumentSelection(int nDelta);
@@ -182,7 +257,7 @@ private:
 	// Actions that can be triggered via events
 	void SwitchSoundFont(size_t nIndex);
 	void DeferSwitchSoundFont(size_t nIndex);
-	void ApplyProgramChange(size_t nIndex);
+	bool ApplyProgramChange(size_t nIndex);
 	bool ApplyDrumKit(size_t nIndex);
 	void ApplyLastInstrument();
 	void SetMasterVolume(s32 nVolume);
@@ -236,15 +311,14 @@ private:
 	size_t m_nDeferredSoundFontSwitchIndex;
 	unsigned m_nDeferredSoundFontSwitchTime;
 
-	// Footswitches that are held down (bit 0: button 1, bit 1: button 2); a press of both or a held footswitch
-	// doesn't also move the selection when released
-	u8 m_nFootswitchesDown;
-	bool m_bFootswitchesBoth;
-	bool m_bFootswitchRepeated;
+	// The second encoder's button acts when released; held, it leaves the settings
+	bool m_bEncoder2ButtonHeld;
+	bool m_bEncoder2LongPress;
 
 	// Current menu and its selection
 	TMenu m_Menu;
-	u8 m_nSetting;
+	TSettingsPage m_SettingsPage;
+	u8 m_nSetting;		// The settings item that is open (or highlighted when going back to the list)
 	size_t m_nMenuIndex;
 	size_t m_nMenuCurrentIndex;
 	unsigned m_nMenuTime;
@@ -278,6 +352,23 @@ private:
 
 	// Extra devices
 	CPisound* m_pPisound;
+
+	// Fishman TriplePlay on the USB MIDI device; switched on and off in the config file or the settings
+	CTriplePlay* m_pTriplePlay;
+	volatile bool m_bTriplePlayEnabled;
+	bool m_bTriplePlaySoftwareMode;
+	// Its program changes switch presets rather than the synth's instrument; the program received last (set in
+	// interrupt context), -1 for none
+	volatile bool m_bTriplePlayProgramPresets;
+	volatile int m_nTriplePlayProgram;
+
+	// Presets that the footswitches switch between; all changes to the sound go into the current one
+	CPresets m_Presets;
+	CPresetSaver* m_pPresetSaver;
+	int m_nCurrentPreset;	// -1 for none
+	bool m_bApplyingPreset;	// Its own changes aren't saved back into it
+	bool m_bPresetChanged;
+	unsigned m_nPresetChangeTime;
 
 	// Synthesizer
 	u8 m_nMasterVolume;

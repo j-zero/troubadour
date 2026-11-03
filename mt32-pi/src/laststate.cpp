@@ -38,7 +38,12 @@ CLastState::CLastState()
 	  nDrumBank(-1),
 	  nDrumProgram(-1),
 	  nVolume(-1),
-	  nDisplayChannels(-1)
+	  nDisplayChannels(-1),
+	  nDisplayStandby(-1),
+	  nTriplePlay(-1),
+	  nTriplePlaySoftwareMode(-1),
+	  nTriplePlayProgramPresets(-1),
+	  nPreset(-1)
 {
 }
 
@@ -76,6 +81,8 @@ bool CLastState::Load(const char* pPath)
 		nDrumBank = nDrumProgram = -1;
 	if (nDisplayChannels < 1 || nDisplayChannels > 16)
 		nDisplayChannels = -1;
+	if (nDisplayStandby < 0 || nDisplayStandby > 3600)
+		nDisplayStandby = -1;
 
 	Format(m_SavedText);
 
@@ -127,6 +134,10 @@ void CLastState::Format(CString& Text) const
 	       "# drum_bank, drum_program: drum kit on MIDI channel 10\n"
 	       "# volume:    master volume (0-100)\n"
 	       "# display_channels: number of channels shown on the home screen (1-16)\n"
+	       "# display_standby: seconds without activity before the display turns off (0: never)\n"
+	       "# tripleplay, tripleplay_software_mode, tripleplay_program_change_presets: as\n"
+	       "#   enabled/software_mode/program_change_presets in [tripleplay]\n"
+	       "# preset: current preset (from 0)\n"
 	       "# reverb_*, chorus_*: effect settings, as in mt32-pi.cfg\n";
 
 	Line.Format("[%s]\n", StateSection);
@@ -159,6 +170,36 @@ void CLastState::Format(CString& Text) const
 	if (nDisplayChannels >= 0)
 	{
 		Line.Format("display_channels = %d\n", nDisplayChannels);
+		Text.Append(Line);
+	}
+
+	if (nDisplayStandby >= 0)
+	{
+		Line.Format("display_standby = %d\n", nDisplayStandby);
+		Text.Append(Line);
+	}
+
+	if (nTriplePlay >= 0)
+	{
+		Line.Format("tripleplay = %s\n", nTriplePlay ? "on" : "off");
+		Text.Append(Line);
+	}
+
+	if (nTriplePlaySoftwareMode >= 0)
+	{
+		Line.Format("tripleplay_software_mode = %s\n", nTriplePlaySoftwareMode ? "on" : "off");
+		Text.Append(Line);
+	}
+
+	if (nTriplePlayProgramPresets >= 0)
+	{
+		Line.Format("tripleplay_program_change_presets = %s\n", nTriplePlayProgramPresets ? "on" : "off");
+		Text.Append(Line);
+	}
+
+	if (nPreset >= 0)
+	{
+		Line.Format("preset = %d\n", nPreset);
 		Text.Append(Line);
 	}
 
@@ -235,6 +276,30 @@ int CLastState::INIHandler(void* pUser, const char* pSection, const char* pName,
 		return CConfig::ParseOption(pValue, &pState->nVolume);
 	if (!strcmp(pName, "display_channels"))
 		return CConfig::ParseOption(pValue, &pState->nDisplayChannels);
+	if (!strcmp(pName, "display_standby"))
+		return CConfig::ParseOption(pValue, &pState->nDisplayStandby);
+
+	// Switches, stored as 0/1
+	auto ParseSwitch = [pValue](int* pSwitch)
+	{
+		bool bValue;
+		if (!CConfig::ParseOption(pValue, &bValue))
+			return 0;
+		*pSwitch = bValue;
+		return 1;
+	};
+
+	if (!strcmp(pName, "tripleplay"))
+		return ParseSwitch(&pState->nTriplePlay);
+	if (!strcmp(pName, "tripleplay_software_mode"))
+		return ParseSwitch(&pState->nTriplePlaySoftwareMode);
+	if (!strcmp(pName, "tripleplay_program_change_presets"))
+		return ParseSwitch(&pState->nTriplePlayProgramPresets);
+	// From when presets could be switched off; they are always used now
+	if (!strcmp(pName, "preset_mode"))
+		return 1;
+	if (!strcmp(pName, "preset"))
+		return CConfig::ParseOption(pValue, &pState->nPreset);
 
 	#define MATCH(NAME, TYPE, MEMBER)                          \
 		if (!strcmp(NAME, pName))                          \

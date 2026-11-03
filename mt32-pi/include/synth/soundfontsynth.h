@@ -117,6 +117,12 @@ public:
 	bool SetChannelsPreset(size_t nIndex, u8 nFirstChannel, u8 nChannels, bool* pSamplesLoaded = nullptr,
 			       TPresetList List = TPresetList::Instruments);
 
+	// Instruments of the current SoundFont whose samples are kept in memory, so that selecting them doesn't load
+	// anything (e.g. those of the presets); replaces the ones kept before. Instruments are kept in the order given
+	// while they fit into memory; returns how many were. Switching the SoundFont releases them.
+	static constexpr size_t MaxPinnedInstruments = 32;
+	size_t SetPinnedInstruments(const int* pBanks, const int* pPrograms, size_t nCount);
+
 	// Effect values set here take precedence over the SoundFont's effects profile and the config file, also
 	// after switching SoundFonts. Setting the reverb or chorus level to 0 turns the effect off.
 	static const TEffectInfo& GetEffectInfo(TEffect Effect);
@@ -183,6 +189,10 @@ private:
 	int m_DefaultBanks[MIDIChannels];
 	int m_DefaultPrograms[MIDIChannels];
 	u16 m_nDefaultProgramMask;
+
+	// Instruments pinned with SetPinnedInstruments()
+	TPreset m_PinnedInstruments[MaxPinnedInstruments];
+	size_t m_nPinnedInstruments;
 
 	// For the display, which is updated from another core
 	CSpinLock m_DisplayInfoLock;
